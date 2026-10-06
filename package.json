@@ -1,0 +1,28 @@
+{
+  "name": "campus-notification-engine",
+  "version": "1.0.0",
+  "description": "Campus Notification Engine - HACKBACK V2 clean-room rebuild",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/index.js",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node src/index.js",
+    "seed": "node src/seed.js",
+    "test": "node --test --test-concurrency=1 \"tests/*.test.js\"",
+    "test:kt1": "node --test tests/kt1.test.js",
+    "test:kt2": "node --test tests/kt2.test.js",
+    "test:kt3": "node --test tests/kt3.test.js",
+    "test:webhook": "node --test tests/webhook.test.js",
+    "test:focus": "node --test tests/focus.test.js",
+    "lint": "eslint .",
+    "check": "node scripts/check-syntax.js",
+    "build": "npm run check"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0"
+  }
+}

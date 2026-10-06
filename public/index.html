@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Campus Notification Engine</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --muted:#5b6672; --line:#d9dee4; --accent:#1f5fbf; --ok:#1a7f45; --bad:#b3261e; --warn:#8a5a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151a; --card:#1b2027; --ink:#e8ecf1; --muted:#9aa6b2; --line:#2d3540; --accent:#6ea8ff; --ok:#5bd08a; --bad:#ff8a80; --warn:#f0b955; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui, sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:0 0 12px; }
+  h2 { font-size:16px; margin:0 0 8px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:8px 0 2px; }
+  input, select, textarea, button { font:inherit; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--ink); }
+  input, select, textarea { width:100%; }
+  textarea { min-height:70px; font-family:ui-monospace, monospace; font-size:13px; }
+  button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.secondary { background:transparent; color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; }
+  .row > * { flex:1 1 160px; }
+  .row > button { flex:0 0 auto; }
+  nav { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px; }
+  nav button { background:transparent; color:var(--ink); border-color:var(--line); }
+  nav button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .msg { border-top:1px solid var(--line); padding:10px 0; }
+  .msg:first-child { border-top:0; }
+  .msg.unseen strong::after { content:" • new"; color:var(--accent); font-weight:400; font-size:12px; }
+  .msg pre { margin:4px 0; white-space:pre-wrap; font:inherit; }
+  .muted { color:var(--muted); font-size:13px; }
+  #status { min-height:20px; font-size:13px; margin-bottom:10px; }
+  #status.ok { color:var(--ok); } #status.err { color:var(--bad); }
+  .tag { font-size:12px; border:1px solid var(--line); border-radius:10px; padding:1px 8px; }
+  .tag.success { color:var(--ok); } .tag.failure { color:var(--bad); } .tag.skipped, .tag.info { color:var(--warn); }
+  .toggle { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  .toggle input { width:auto; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Campus Notification Engine</h1>
+  <div id="status" role="status"></div>
+
+  <section class="card" id="login">
+    <h2>Sign in as a student</h2>
+    <p class="muted">Demo console. Sessions are minted with the admin API key, which is kept in memory only (never stored).</p>
+    <div class="row">
+      <div><label for="apiKey">API key</label><input id="apiKey" type="password" autocomplete="off"></div>
+      <div><label for="subId">Subscriber id</label><input id="subId" value="student_001"></div>
+      <button id="loginBtn">Sign in</button>
+    </div>
+  </section>
+
+  <div id="app" hidden>
+    <nav id="tabs">
+      <button data-tab="inbox" class="on">Inbox</button>
+      <button data-tab="prefs">Preferences</button>
+      <button data-tab="focus">Focus Mode</button>
+      <button data-tab="admin">Send / Activity</button>
+    </nav>
+
+    <section class="card" data-panel="inbox">
+      <div class="row"><h2 style="flex:1">Inbox</h2><button class="secondary" id="refreshInbox">Refresh</button></div>
+      <div id="inboxList" class="muted">Loading…</div>
+    </section>
+
+    <section class="card" data-panel="prefs" hidden>
+      <h2>Channel preferences</h2>
+      <div class="toggle"><input type="checkbox" id="prefEmail"><label for="prefEmail" style="margin:0">Email</label></div>
+      <div class="toggle"><input type="checkbox" id="prefInApp"><label for="prefInApp" style="margin:0">In-app</label></div>
+      <p class="muted">Applies to every workflow unless a workflow override exists. Critical alerts ignore mutes.</p>
+      <div id="wfPrefs" class="muted"></div>
+    </section>
+
+    <section class="card" data-panel="focus" hidden>
+      <h2>Focus Mode</h2>
+      <p class="muted">Normal notifications are held and summarised when the timer ends. Critical alerts still arrive immediately.</p>
+      <div id="focusState" class="muted"></div>
+      <div class="row">
+        <div><label for="focusDur">Duration</label>
+          <select id="focusDur"><option value="30m">30 minutes</option><option value="1h">1 hour</option><option value="2h" selected>2 hours</option><option value="4h">4 hours</option></select></div>
+        <button id="focusStart">Start</button>
+        <button id="focusEnd" class="secondary">End now</button>
+      </div>
+      <h2 style="margin-top:16px">Latest catch-up</h2>
+      <div id="focusSummary" class="muted">None yet.</div>
+    </section>
+
+    <section class="card" data-panel="admin" hidden>
+      <h2>Send a test event (admin)</h2>
+      <div class="row">
+        <div><label for="evWf">Workflow</label><select id="evWf"></select></div>
+        <div><label for="evPrio">Priority</label><select id="evPrio"><option>normal</option><option>critical</option></select></div>
+      </div>
+      <label for="evPayload">Payload (JSON)</label>
+      <textarea id="evPayload">{"exam":"CS101","room":"H123","time":"2:00 PM"}</textarea>
+      <p class="muted">Delivered to the signed-in student.</p>
+      <button id="evSend">Send event</button>
+      <h2 style="margin-top:16px">Activity</h2>
+      <div class="row"><div><label for="actTxn">transactionId</label><input id="actTxn"></div><button class="secondary" id="actLoad">Load</button></div>
+      <div id="actList" class="muted"></div>
+    </section>
+  </div>
+</main>
+<script>
+(function () {
+  var token = null, apiKey = '', me = '', poll = null, lastTxn = '';
+  var $ = function (id) { return document.getElementById(id); };
+
+  function say(text, kind) { var s = $('status'); s.textContent = text || ''; s.className = kind || ''; }
+
+  function api(method, path, body, auth) {
+    var headers = {};
+    if (auth === 'key') headers.authorization = 'Bearer ' + apiKey;
+    else if (token) headers.authorization = 'Bearer ' + token;
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    return fetch(path, { method: method, headers: headers, body: body === undefined ? undefined : JSON.stringify(body) })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok) { var e = new Error(j.message || ('HTTP ' + r.status)); e.status = r.status; throw e; }
+        return j; }); });
+  }
+  function guard(p) { return p.catch(function (e) { say(e.message, 'err'); if (e.status === 401 && token) signOut(); throw e; }); }
+
+  function el(tag, text, cls) { var n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; }
+
+  function signOut() { token = null; clearInterval(poll); $('app').hidden = true; $('login').hidden = false; }
+
+  $('loginBtn').onclick = function () {
+    apiKey = $('apiKey').value; me = $('subId').value.trim();
+    api('POST', '/inbox/session', { organizationId: 'campus-org', subscriberId: me }, 'key').then(function (r) {
+      token = r.token; $('login').hidden = true; $('app').hidden = false; say('Signed in as ' + r.subscriberId, 'ok');
+      loadAll(); clearInterval(poll); poll = setInterval(function () { loadInbox(); loadFocus(); }, 3000);
+    }).catch(function (e) { say(e.message + ' (organizationId defaults to campus-org)', 'err'); });
+  };
+
+  $('tabs').onclick = function (e) {
+    var tab = e.target.getAttribute('data-tab'); if (!tab) return;
+    Array.prototype.forEach.call($('tabs').children, function (b) { b.classList.toggle('on', b === e.target); });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-panel]'), function (p) { p.hidden = p.getAttribute('data-panel') !== tab; });
+  };
+
+  function loadInbox() {
+    return api('GET', '/inbox/notifications?limit=50').then(function (r) {
+      var box = $('inboxList'); box.textContent = '';
+      if (!r.notifications.length) { box.textContent = 'No notifications.'; return; }
+      r.notifications.forEach(function (n) {
+        var d = el('div', undefined, 'msg' + (n.seen ? '' : ' unseen'));
+        d.appendChild(el('strong', n.subject || n.workflowId));
+        d.appendChild(el('pre', n.content));
+        d.appendChild(el('span', new Date(n.createdAt).toLocaleString() + ' · ' + n.workflowId + ' ', 'muted'));
+        if (!n.seen) { var b = el('button', 'Mark seen', 'secondary'); b.onclick = function () { guard(api('PATCH', '/inbox/notifications/' + n.messageId + '/seen')).then(loadInbox); }; d.appendChild(b); }
+        box.appendChild(d);
+      });
+    }).catch(function () {});
+  }
+  $('refreshInbox').onclick = loadInbox;
+
+  function loadPrefs() {
+    return api('GET', '/inbox/preferences').then(function (p) {
+      $('prefEmail').checked = p.global.email; $('prefInApp').checked = p.global.inApp;
+      var w = Object.keys(p.workflows).map(function (k) { return k + ': ' + JSON.stringify(p.workflows[k]); });
+      $('wfPrefs').textContent = w.length ? 'Workflow overrides — ' + w.join('; ') : 'No workflow overrides.';
+    }).catch(function () {});
+  }
+  function savePrefs() {
+    guard(api('PATCH', '/inbox/preferences', { email: $('prefEmail').checked, inApp: $('prefInApp').checked }))
+      .then(function () { say('Preferences saved', 'ok'); });
+  }
+  $('prefEmail').onchange = savePrefs; $('prefInApp').onchange = savePrefs;
+
+  function renderSummary(s) {
+    var box = $('focusSummary'); box.textContent = '';
+    if (!s) { box.textContent = 'None yet.'; return; }
+    if (!s.items.length) { box.textContent = 'Nothing needed your attention.'; return; }
+    box.appendChild(el('strong', s.subject));
+    s.items.forEach(function (i) {
+      var line = el('div', '• ' + i.label + ': ' + (i.changes.length ? i.changes.map(function (c) { return c.field + ' ' + c.from + ' → ' + c.to; }).join(', ') : Object.keys(i.latest).map(function (k) { return k + ': ' + i.latest[k]; }).join(', ')) + (i.relatedEvents > 1 ? ' (' + i.relatedEvents + ' related updates)' : ''));
+      if (i.actionRequired) line.appendChild(el('span', ' action required', 'tag failure'));
+      box.appendChild(line);
+    });
+    if (s.interrupted.length) box.appendChild(el('div', 'Already delivered immediately: ' + s.interrupted.map(function (i) { return i.label; }).join(', '), 'muted'));
+    box.appendChild(el('div', 'Suppressed as redundant: ' + (s.suppressed.acknowledged + s.suppressed.duplicates), 'muted'));
+  }
+  function loadFocus() {
+    return api('GET', '/inbox/focus-mode/status').then(function (s) {
+      $('focusState').textContent = s.active ? 'Active until ' + new Date(s.session.endsAt).toLocaleTimeString() + ' · ' + s.heldCount + ' held' : 'Not active.';
+      $('focusStart').disabled = s.active; $('focusEnd').disabled = !s.active;
+      return api('GET', '/inbox/focus-mode/summary').then(renderSummary, function (e) { if (e.status !== 404) throw e; renderSummary(null); });
+    }).catch(function () {});
+  }
+  $('focusStart').onclick = function () { guard(api('POST', '/inbox/focus-mode/start', { duration: $('focusDur').value })).then(function () { say('Focus Mode started', 'ok'); loadFocus(); }); };
+  $('focusEnd').onclick = function () { guard(api('POST', '/inbox/focus-mode/end')).then(function () { say('Focus Mode ended; summary will arrive shortly', 'ok'); loadFocus(); }); };
+
+  function loadWorkflows() {
+    return api('GET', '/admin/workflows', undefined, 'key').then(function (r) {
+      var sel = $('evWf'); sel.textContent = '';
+      r.workflows.forEach(function (w) { var o = el('option', w.identifier); o.value = w.identifier; sel.appendChild(o); });
+    }).catch(function () {});
+  }
+  $('evSend').onclick = function () {
+    var payload; try { payload = JSON.parse($('evPayload').value); } catch (e) { say('Payload is not valid JSON', 'err'); return; }
+    lastTxn = 'ui-' + Date.now();
+    guard(api('POST', '/events/trigger', { transactionId: lastTxn, workflowIdentifier: $('evWf').value, priority: $('evPrio').value,
+      to: { type: 'explicit', subscriberIds: [me] }, payload: payload }, 'key'))
+      .then(function (r) { say('Accepted ' + r.transactionId + ' (' + r.recipientCount + ' recipient)', 'ok'); $('actTxn').value = lastTxn; });
+  };
+  $('actLoad').onclick = function () {
+    guard(api('GET', '/admin/activity?limit=200&transactionId=' + encodeURIComponent($('actTxn').value), undefined, 'key')).then(function (r) {
+      var box = $('actList'); box.textContent = '';
+      r.events.forEach(function (e) {
+        var d = el('div', undefined, 'msg');
+        d.appendChild(el('span', e.status, 'tag ' + e.status)); d.appendChild(document.createTextNode(' ' + e.event + (e.attempt ? ' (attempt ' + e.attempt + ')' : '') + ' — ' + (e.details || '')));
+        box.appendChild(d);
+      });
+      if (!r.events.length) box.textContent = 'No activity.';
+    });
+  };
+
+  function loadAll() { loadInbox(); loadPrefs(); loadFocus(); loadWorkflows(); }
+})();
+</script>
+</body>
+</html>
