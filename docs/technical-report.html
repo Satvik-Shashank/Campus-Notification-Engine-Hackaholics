@@ -1,0 +1,776 @@
+<title>Campus Notification Engine — Technical Report</title>
+<style>
+  /* === TOKEN SYSTEM — document / dark-aware ===
+     Layout: constrained single column, section-divided, print-ready typography
+  */
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Serif:ital,wght@0,400;0,700;1,400&display=swap');
+
+  :root {
+    --bg:        #f7f8fa;
+    --surface:   #ffffff;
+    --border:    #dde1e9;
+    --fg:        #1a1d23;
+    --fg-muted:  #5a6070;
+    --accent:    #0f4c81;
+    --accent-lt: #e8f0fb;
+    --pass:      #0d6e3b;
+    --pass-bg:   #e6f5ee;
+    --fail:      #b91c1c;
+    --fail-bg:   #fef2f2;
+    --warn:      #92400e;
+    --warn-bg:   #fffbeb;
+    --code-bg:   #eef1f6;
+    --rule:      #c5cad6;
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --border:    #2a2f3f;
+      --fg:        #e8eaf0;
+      --fg-muted:  #8890a6;
+      --accent:    #5b9bd5;
+      --accent-lt: #1a2640;
+      --pass:      #4ade80;
+      --pass-bg:   #0d2a1a;
+      --fail:      #f87171;
+      --fail-bg:   #2a0d0d;
+      --warn:      #fbbf24;
+      --warn-bg:   #2a1f0a;
+      --code-bg:   #22263a;
+      --rule:      #2a2f3f;
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg:        #0f1117;
+    --surface:   #1a1d27;
+    --border:    #2a2f3f;
+    --fg:        #e8eaf0;
+    --fg-muted:  #8890a6;
+    --accent:    #5b9bd5;
+    --accent-lt: #1a2640;
+    --pass:      #4ade80;
+    --pass-bg:   #0d2a1a;
+    --fail:      #f87171;
+    --fail-bg:   #2a0d0d;
+    --warn:      #fbbf24;
+    --warn-bg:   #2a1f0a;
+    --code-bg:   #22263a;
+    --rule:      #2a2f3f;
+    color-scheme: dark;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.7;
+    padding-inline: 24px;
+    padding-block: 40px;
+  }
+
+  .doc {
+    max-width: 820px;
+    margin-inline: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  /* Cover */
+  .cover {
+    background: var(--accent);
+    color: #ffffff;
+    border-radius: 8px 8px 0 0;
+    padding: 40px 40px 32px;
+  }
+  .cover-eyebrow {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    opacity: .75;
+    margin-bottom: 12px;
+  }
+  .cover-title {
+    font-family: 'IBM Plex Serif', Georgia, serif;
+    font-size: clamp(22px, 4vw, 32px);
+    font-weight: 700;
+    line-height: 1.25;
+    text-wrap: balance;
+    margin-bottom: 10px;
+  }
+  .cover-sub {
+    font-size: 14px;
+    opacity: .82;
+    max-width: 56ch;
+    margin-bottom: 28px;
+  }
+  .cover-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    font-size: 13px;
+    opacity: .85;
+    border-top: 1px solid rgba(255,255,255,.2);
+    padding-top: 20px;
+  }
+  .cover-meta dt { font-weight: 600; margin-bottom: 2px; }
+  .cover-meta dd { opacity: .9; }
+
+  /* TOC */
+  .toc {
+    background: var(--accent-lt);
+    border: 1px solid var(--border);
+    border-top: none;
+    padding: 24px 32px;
+  }
+  .toc-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+    margin-bottom: 12px;
+  }
+  .toc ol { padding-left: 20px; }
+  .toc li { font-size: 14px; margin-bottom: 4px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .toc .sub { padding-left: 18px; margin-top: 4px; list-style-type: lower-alpha; }
+
+  /* Section frame */
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-top: none;
+    padding: 36px 40px;
+  }
+  .section:last-child { border-radius: 0 0 8px 8px; }
+
+  .section-eyebrow {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  h2.section-title {
+    font-family: 'IBM Plex Serif', Georgia, serif;
+    font-size: clamp(18px, 3vw, 24px);
+    font-weight: 700;
+    line-height: 1.3;
+    color: var(--fg);
+    text-wrap: balance;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 2px solid var(--accent);
+  }
+
+  h3 {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--fg);
+    margin-top: 28px;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    font-size: 12px;
+  }
+  h4 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-top: 20px;
+    margin-bottom: 8px;
+  }
+
+  p {
+    margin-bottom: 14px;
+    max-width: 70ch;
+    color: var(--fg);
+  }
+  p:last-child { margin-bottom: 0; }
+
+  /* Callout boxes */
+  .callout {
+    border-left: 3px solid;
+    padding: 12px 16px;
+    border-radius: 0 6px 6px 0;
+    margin-block: 16px;
+    font-size: 14px;
+  }
+  .callout.problem  { border-color: var(--fail);  background: var(--fail-bg);  color: var(--fail); }
+  .callout.fixed    { border-color: var(--pass);  background: var(--pass-bg);  color: var(--pass); }
+  .callout.note     { border-color: var(--accent); background: var(--accent-lt); color: var(--accent); }
+  .callout.warn     { border-color: var(--warn);  background: var(--warn-bg);  color: var(--warn); }
+  .callout strong   { display: block; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; opacity: .8; }
+  .callout p        { color: inherit; max-width: none; margin: 0; }
+
+  /* Code */
+  code {
+    font-family: 'IBM Plex Mono', 'Courier New', monospace;
+    font-size: 13px;
+    background: var(--code-bg);
+    color: var(--fg);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin-block: 16px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--fg);
+  }
+  pre code { background: none; padding: 0; }
+
+  /* Tables */
+  .tbl-wrap { overflow-x: auto; margin-block: 16px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+    min-width: 500px;
+  }
+  thead th {
+    background: var(--code-bg);
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+    padding: 9px 14px;
+    text-align: left;
+    border-bottom: 2px solid var(--border);
+  }
+  tbody td {
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--accent-lt); }
+
+  /* Verdict badge */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 3px 9px;
+    border-radius: 99px;
+    white-space: nowrap;
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: .04em;
+  }
+  .badge.pass { background: var(--pass-bg); color: var(--pass); }
+  .badge.fail { background: var(--fail-bg); color: var(--fail); }
+  .badge.skip { background: var(--warn-bg); color: var(--warn); }
+  .badge::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+
+  /* Flow diagram */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin-block: 20px;
+    font-size: 13.5px;
+  }
+  .flow-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+  }
+  .flow-node {
+    flex: 1;
+    border: 1.5px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    background: var(--surface);
+    font-weight: 500;
+    text-align: center;
+    position: relative;
+  }
+  .flow-node.bad  { border-color: var(--fail);  background: var(--fail-bg);  color: var(--fail); }
+  .flow-node.good { border-color: var(--pass);  background: var(--pass-bg);  color: var(--pass); }
+  .flow-node.neu  { border-color: var(--accent); background: var(--accent-lt); color: var(--accent); }
+  .flow-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 8px;
+    font-size: 18px;
+    color: var(--fg-muted);
+    font-weight: 300;
+  }
+  .flow-fork {
+    display: flex;
+    gap: 12px;
+    margin-top: 4px;
+  }
+  .flow-fork .flow-node { font-size: 13px; }
+
+  /* Step list */
+  ol.steps { padding-left: 20px; margin-block: 12px; }
+  ol.steps li { margin-bottom: 8px; max-width: 66ch; }
+
+  ul.bullets { padding-left: 20px; margin-block: 12px; }
+  ul.bullets li { margin-bottom: 6px; max-width: 66ch; }
+
+  /* Divider */
+  hr { border: none; border-top: 1px solid var(--rule); margin-block: 28px; }
+
+  /* Summary row */
+  .summary-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-block: 20px;
+  }
+  .stat-box {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 20px;
+    min-width: 120px;
+    text-align: center;
+  }
+  .stat-box .stat-n {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .stat-box .stat-n.green { color: var(--pass); }
+  .stat-box .stat-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+    margin-top: 3px;
+  }
+
+  @media (max-width: 600px) {
+    body { padding-inline: 16px; padding-block: 24px; }
+    .cover, .toc, .section { padding: 24px 20px; }
+    h2.section-title { font-size: 19px; }
+    .flow-fork { flex-direction: column; }
+    .summary-row { gap: 8px; }
+  }
+</style>
+
+<div class="doc">
+
+  <!-- COVER -->
+  <div class="cover">
+    <p class="cover-eyebrow">Hackaholics · HACKBACK V2 · Campus Notification Engine</p>
+    <h1 class="cover-title">Technical Implementation Report:<br>Webhook Fix &amp; Intelligent Focus Mode</h1>
+    <p class="cover-sub">This document describes two improvements to the notification engine. It covers the problem, the fix, and the test evidence for each improvement.</p>
+    <dl class="cover-meta">
+      <div><dt>Prepared by</dt><dd>Team Hackaholics</dd></div>
+      <div><dt>Document type</dt><dd>Technical Report</dd></div>
+      <div><dt>Standard</dt><dd>ASD-STE100 (≥ 90%)</dd></div>
+      <div><dt>Test run</dt><dd>25 / 25 + 8 / 8 PASS</dd></div>
+    </dl>
+  </div>
+
+  <!-- TOC -->
+  <div class="toc">
+    <p class="toc-label">Contents</p>
+    <ol>
+      <li><a href="#s1">Part 1 — Webhook Signature Verification Fix</a>
+        <ol class="sub">
+          <li><a href="#s1-1">What is a webhook?</a></li>
+          <li><a href="#s1-2">What was wrong before the fix?</a></li>
+          <li><a href="#s1-3">What was the impact?</a></li>
+          <li><a href="#s1-4">How was it fixed?</a></li>
+          <li><a href="#s1-5">Proof: fix test results</a></li>
+          <li><a href="#s1-6">Proof: killer test results</a></li>
+        </ol>
+      </li>
+      <li><a href="#s2">Part 2 — Intelligent Focus Mode (Differentiator)</a>
+        <ol class="sub">
+          <li><a href="#s2-1">What is the unique point?</a></li>
+          <li><a href="#s2-2">What was missing before?</a></li>
+          <li><a href="#s2-3">How does it work?</a></li>
+          <li><a href="#s2-4">Proof: feature test results</a></li>
+          <li><a href="#s2-5">Proof: killer test results</a></li>
+        </ol>
+      </li>
+    </ol>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- PART 1 -->
+  <!-- ============================================================ -->
+  <div class="section" id="s1">
+    <p class="section-eyebrow">Part 1 of 2 — Security Fix</p>
+    <h2 class="section-title">Webhook Signature Verification: Fail-Closed</h2>
+
+    <h3 id="s1-1">1.1 What is a webhook?</h3>
+    <p>A <strong>webhook</strong> is an HTTP callback. When an email provider (for example, SendGrid or Mailgun) delivers or bounces an email, it sends a webhook request to the notification engine. The engine uses this request to update the delivery record.</p>
+    <p>Webhook requests arrive from external providers. The engine must verify that each request comes from the correct provider. It does this by checking a <strong>signature</strong>. A signature is a cryptographic value that only the real provider can produce.</p>
+
+    <h3 id="s1-2">1.2 What was wrong before the fix?</h3>
+
+    <div class="callout problem">
+      <strong>Problem</strong>
+      <p>The original code used a <strong>fail-open</strong> pattern. When verification was not possible, the code treated the webhook as verified. Unverified webhooks changed delivery records.</p>
+    </div>
+
+    <p>The problem occurred in three situations:</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Situation</th><th>Expected behavior</th><th>Actual behavior (before fix)</th></tr></thead>
+        <tbody>
+          <tr><td>Signature is invalid (wrong key or tampered body)</td><td>Reject with 401</td><td>Accept and process</td></tr>
+          <tr><td>Signature is missing from the request</td><td>Reject with 401</td><td>Accept and process</td></tr>
+          <tr><td>Provider does not support signature verification</td><td>Reject with 400</td><td>Accept and process</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>In the original code, <code>BaseHandler.verifySignature()</code> returned a trusted result even when it could not verify the signature. The code did not have a fail-closed path for unsupported providers.</p>
+
+    <h3 id="s1-3">1.3 What was the impact?</h3>
+    <p>This was a <strong>trust boundary violation</strong>. The notification engine accepted data from untrusted sources. An attacker did not need to access any internal system. The attacker only needed to send an HTTP request to the public webhook endpoint.</p>
+
+    <div class="callout warn">
+      <strong>Campus scenario</strong>
+      <p>An attacker sends a forged webhook request that claims all 30,000 exam-change emails were delivered. The engine marks them all as <code>delivered</code>. No retry occurs. Students do not receive the notifications. No operator detects the problem because the records show success.</p>
+    </div>
+
+    <h3 id="s1-4">1.4 How was it fixed?</h3>
+    <p>The fix replaces the fail-open pattern with a <strong>fail-closed</strong> pattern. The system defines five verification outcomes. Only one outcome allows the system to process a webhook event.</p>
+
+    <div class="flow">
+      <div class="flow-row"><div class="flow-node neu">Inbound webhook request arrives at <code>POST /webhooks/:provider</code></div></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-row"><div class="flow-node">System calls <code>webhooks.verify(provider, {rawBody, headers, body})</code></div></div>
+      <div class="flow-arrow">↓ Returns one of five outcomes</div>
+      <div class="flow-fork">
+        <div class="flow-node good"><strong>valid</strong><br>Signature correct → apply event, return 200</div>
+        <div class="flow-node bad"><strong>invalid</strong><br>Signature present but wrong → reject 401</div>
+        <div class="flow-node bad"><strong>missing</strong><br>No signature in request → reject 401</div>
+        <div class="flow-node bad"><strong>unsupported</strong><br>No verifier for this provider → reject 400</div>
+        <div class="flow-node bad"><strong>unconfigured</strong><br>Secret not set by operator → reject 400</div>
+      </div>
+    </div>
+
+    <p>There is one exception. An operator can explicitly allow an unsupported provider by setting <code>WEBHOOK_ALLOW_UNVERIFIED_&lt;PROVIDER&gt;=true</code>. In this case, the engine records the webhook as <code>unverified</code> and returns 202. The engine does <strong>not</strong> apply the event to any delivery record. The applied count is always 0 for unverified requests.</p>
+
+    <h4>Two verification schemes</h4>
+    <p>The fix implements two cryptographic verification schemes. Each scheme serves a different provider type.</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Scheme name</th><th>How it works</th><th>Providers</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>hmac-sha256-body</code></td>
+            <td>Reads the <code>x-webhook-signature</code> header. Computes HMAC-SHA256 of the raw request body. Uses <code>timingSafeEqual</code> to compare the two values.</td>
+            <td>Generic (custom providers)</td>
+          </tr>
+          <tr>
+            <td><code>timestamp-token</code></td>
+            <td>Reads a <code>signature</code> object from the request body. Checks that the timestamp is within the allowed window. Computes HMAC-SHA256 of <code>timestamp + token</code>.</td>
+            <td>Mailgun</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>SendGrid uses ECDSA signatures. The fix does not implement an ECDSA verifier. SendGrid webhooks therefore return the <code>unsupported</code> outcome and are rejected. This is correct fail-closed behavior.</p>
+
+    <h4>Audit trail</h4>
+    <p>The engine records every webhook request in the <code>webhook_events</code> table. Each row contains the provider name, the verification outcome, whether the event was applied, and a SHA-256 hash of the request body. The row does not contain the signature value or the secret key. This prevents secret leakage through the audit log.</p>
+
+    <h3 id="s1-5">1.5 Proof: fix test results</h3>
+    <p>The following nine tests cover all five outcomes and the audit trail rule. All nine tests passed.</p>
+
+    <div class="summary-row">
+      <div class="stat-box"><div class="stat-n green">9</div><div class="stat-label">Tests run</div></div>
+      <div class="stat-box"><div class="stat-n green">9</div><div class="stat-label">Passed</div></div>
+      <div class="stat-box"><div class="stat-n">0</div><div class="stat-label">Failed</div></div>
+    </div>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Test name</th><th>What it verifies</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Valid signature accepted and processed</td><td><code>valid</code> → HTTP 200, event applied, <code>applied=1</code></td><td><span class="badge pass">PASS</span></td></tr>
+          <tr><td>2</td><td>Invalid signature rejected (401), changes nothing</td><td>Wrong key → 401; tampered body → 401; malformed header → 401; no delivery record modified</td><td><span class="badge pass">PASS</span></td></tr>
+          <tr><td>3</td><td>Missing signature rejected (401)</td><td>No header present → 401, body: <code>verification: "missing"</code></td><td><span class="badge pass">PASS</span></td></tr>
+          <tr><td>4</td><td>Unsupported verification fails closed</td><td>sendgrid → 400 even with a configured secret; unknown provider → 400; invalid name format → 400; nothing applied</td><td><span class="badge pass">PASS</span></td></tr>
+          <tr><td>5</td><td>Verifiable provider with no secret rejected</td><td><code>unconfigured</code> → 400, nothing applied</td><td><span class="badge pass">PASS</span></td></tr>
+          <tr><td>6</td><td>Explicit opt-in records but never applies</td><td><code>webhookAllowUnverified: {sendgrid: true}</code> → 202, <code>applied=0</code>, delivery record unchanged</td><td><span class="badge pass">PASS</span></td></tr>
+          <tr><td>7</td><td>Timestamp-token scheme: valid, stale, forged</td><td>Correct Mailgun HMAC → 200; timestamp &gt; tolerance → 401; wrong key → 401; missing block → 401</td><td><span class="badge pass">PASS</span></td></tr>
+          <tr><td>8</td><td>Verified bounce marks message <code>delivery_failed</code></td><td>Bounce event → <code>provider_status=bounced</code>, <code>status=delivery_failed</code>; unknown ID ignored; bad JSON applies nothing</td><td><span class="badge pass">PASS</span></td></tr>
+          <tr><td>9</td><td>Audit rows contain no signature or secret</td><td>JSON dump of <code>webhook_events</code> does not contain the secret string or HMAC value</td><td><span class="badge pass">PASS</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 id="s1-6">1.6 Proof: killer test results</h3>
+    <p>The killer test cases test the core behavior of the notification engine. The webhook fix must not break any killer test.</p>
+    <p>All 16 killer tests ran with the webhook module active. All 16 passed. The fix is backward compatible.</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Killer test</th><th>Tests run</th><th>Tests passed</th><th>Interaction with webhook fix</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>KT1</strong> — Ten events in 5 min arrive as one digest</td>
+            <td>4</td><td><span class="badge pass">4 PASS</span></td>
+            <td>Webhook module is not in the digest path. No interaction.</td>
+          </tr>
+          <tr>
+            <td><strong>KT2</strong> — Muted email user receives in-app only</td>
+            <td>5</td><td><span class="badge pass">5 PASS</span></td>
+            <td>Webhooks update delivery status after send. They do not affect preference evaluation. No interaction.</td>
+          </tr>
+          <tr>
+            <td><strong>KT3</strong> — Failed send is retried without duplicates</td>
+            <td>7</td><td><span class="badge pass">7 PASS</span></td>
+            <td>A forged webhook cannot mark a failed message as <code>delivered</code> and suppress a legitimate retry. The fix closes this path.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout fixed">
+      <strong>Conclusion</strong>
+      <p>The fail-open vulnerability is closed. Only a webhook with a valid cryptographic signature can change any delivery record. All 9 fix tests and all 16 killer tests pass.</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- PART 2 -->
+  <!-- ============================================================ -->
+  <div class="section" id="s2">
+    <p class="section-eyebrow">Part 2 of 2 — New Feature</p>
+    <h2 class="section-title">Intelligent Focus Mode</h2>
+
+    <h3 id="s2-1">2.1 What is the unique point?</h3>
+    <p>The notification engine already has a <strong>digest</strong> feature. A digest collects several messages into one email. It groups messages. It does not filter them. It does not classify them by urgency. It does not suppress messages that carry the same underlying fact.</p>
+
+    <div class="callout note">
+      <strong>The unique point</strong>
+      <p><strong>Intelligent Focus Mode</strong> lets a student hold all non-critical notifications for a set period. It delivers critical events immediately. When the period ends, it sends one summary that shows only the meaningful changes. It suppresses messages that repeat a fact the student already saw.</p>
+    </div>
+
+    <p>This is different from a digest in three ways:</p>
+    <ul class="bullets">
+      <li>A digest batches messages by time window. Focus Mode batches messages by student intent (the student chooses to focus).</li>
+      <li>A digest lists every message. Focus Mode correlates related events and shows one item per underlying change.</li>
+      <li>A digest does not bypass critical events. Focus Mode delivers critical events immediately, even during the focus period.</li>
+    </ul>
+
+    <p>A search of the original codebase found no evidence of Focus Mode, event correlation, acknowledgement-aware suppression, or catch-up summaries. This feature is entirely new.</p>
+
+    <h3 id="s2-2">2.2 What was missing before?</h3>
+    <p>The campus scenario requires that a student receive exam-related notifications reliably but without constant interruption. The original engine had no mechanism to support this. The only options were:</p>
+    <ul class="bullets">
+      <li><strong>Receive all notifications immediately.</strong> This causes many interruptions during study periods.</li>
+      <li><strong>Use digest.</strong> This delays all notifications, including critical ones such as a room change 15 minutes before an exam.</li>
+      <li><strong>Mute a channel.</strong> This blocks all notifications on that channel, with no critical bypass.</li>
+    </ul>
+    <p>None of these options allowed the student to focus and still receive urgent alerts.</p>
+
+    <h3 id="s2-3">2.3 How does it work?</h3>
+
+    <h4>Lifecycle</h4>
+    <p>The student calls <code>POST /inbox/focus-mode/start</code> with a duration (for example, <code>"2h"</code> or <code>90</code> minutes). The engine records a focus session for that subscriber. The session has a start time and an end time.</p>
+    <p>When the end time passes, the engine closes the session automatically. The student can also call <code>POST /inbox/focus-mode/end</code> to close the session early. Either action triggers summary generation.</p>
+
+    <h4>Event classification</h4>
+    <p>When an event arrives for a subscriber who has an active focus session, the engine classifies the event. The engine uses the workflow definition and the event payload to make this decision.</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Classification</th><th>Condition</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td>Critical</td><td>Workflow has <code>critical: true</code>, or the event payload matches a <code>criticalRules</code> condition (for example, <code>minutesUntilExam &lt; 30</code>), or the trigger has <code>priority: "critical"</code></td><td>Deliver immediately. Bypass Focus Mode. Log <code>focus_bypassed</code>.</td></tr>
+          <tr><td>Non-critical</td><td>All other events</td><td>Hold the event. Set job status to <code>deferred</code>. Set notification status to <code>held</code>. Log <code>step_deferred</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h4>Event correlation</h4>
+    <p>When Focus Mode ends, the engine groups held events by their <strong>correlation key</strong>. The correlation key is set in the workflow definition (for example, <code>correlationKey: "exam"</code>). Events with the same key and the same correlation value (for example, the same exam identifier) form one group.</p>
+    <p>Within each group, the engine computes the changes. It compares the first event payload to the last event payload and records which fields changed. Exact duplicate events (same payload as a previous event in the group) increment the <code>suppressed.duplicates</code> counter.</p>
+
+    <h4>Acknowledgement-aware suppression</h4>
+    <p>If the student already saw a critical bypass event during the focus period, the engine checks whether the held events in the same group carry new information. If the held events do not carry new information (they repeat the same fact as the acknowledged critical event), the engine suppresses them from the summary.</p>
+    <p>If all held events are suppressed, the engine sets <code>summary.sent = false</code> and does not send a summary message. This avoids a notification with no new content.</p>
+
+    <h4>Summary generation</h4>
+    <p>The catch-up summary contains one item per correlation group. Each item shows the label, the number of related events, the computed changes, and whether the group was already interrupted by a critical bypass. The summary also lists the suppression counts.</p>
+    <p>The summary is delivered according to the student's channel preferences. If the student has muted email, the summary arrives as an in-app message only.</p>
+
+    <h4>Example scenario</h4>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Event</th><th>Classification</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td>3:05 PM</td><td>Exam CS101 — room changed to H123</td><td>Non-critical</td><td>Hold</td></tr>
+          <tr><td>3:10 PM</td><td>Exam CS101 — room H123 confirmed</td><td>Non-critical</td><td>Hold + correlate with 3:05</td></tr>
+          <tr><td>3:15 PM</td><td>Grade posted — MATH 89/100</td><td>Non-critical</td><td>Hold</td></tr>
+          <tr><td>3:45 PM</td><td>Exam CS101 starts in 15 minutes</td><td><strong>Critical</strong> (<code>minutesUntilExam &lt; 30</code>)</td><td>Deliver immediately (1 email + 1 in-app)</td></tr>
+          <tr><td>5:00 PM</td><td>Focus Mode ends (2 h timer)</td><td>—</td><td>Generate catch-up: 1 summary email + 1 in-app</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The student receives 2 emails and 2 in-app messages total. Without Focus Mode, the student would receive 4 emails and 4 in-app messages, with no classification by urgency.</p>
+
+    <h3 id="s2-4">2.4 Proof: feature test results</h3>
+    <p>The following eight tests cover all claimed behaviors. All eight tests passed.</p>
+
+    <div class="summary-row">
+      <div class="stat-box"><div class="stat-n green">8</div><div class="stat-label">Tests run</div></div>
+      <div class="stat-box"><div class="stat-n green">8</div><div class="stat-label">Passed</div></div>
+      <div class="stat-box"><div class="stat-n">0</div><div class="stat-label">Failed</div></div>
+    </div>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Test name</th><th>Feature verified</th><th>Key assertions</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td>Normal held, critical bypasses, catch-up summary follows</td>
+            <td>Full lifecycle</td>
+            <td>0 emails during focus; 1 critical bypasses; 1 summary at end; <code>heldCount=3</code>; <code>relatedEvents=2</code> for CS101 group; <code>suppressed.acknowledged ≥ 1</code></td>
+            <td><span class="badge pass">PASS</span></td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td>Related events correlated; exact repeats suppressed</td>
+            <td>Event correlation + duplicate suppression</td>
+            <td>3 events → 1 summary item; <code>changes=[{field:"room", from:"A201", to:"H123"}]</code>; <code>suppressed.duplicates=1</code>; 1 email instead of 3</td>
+            <td><span class="badge pass">PASS</span></td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td>Already-seen in-app message suppresses redundant held follow-up</td>
+            <td>Acknowledgement-aware suppression</td>
+            <td>Student sees critical bypass during session; held event for same fact → <code>summary.sent=false</code>; <code>suppressed.acknowledged=1</code></td>
+            <td><span class="badge pass">PASS</span></td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td>Ends on deadline; manual end works</td>
+            <td>Timer-based and manual lifecycle</td>
+            <td>Event held until <code>t+30m+1</code>; <code>POST /end</code> returns 200 with inline summary; second <code>POST /end</code> returns 404</td>
+            <td><span class="badge pass">PASS</span></td>
+          </tr>
+          <tr>
+            <td>5</td>
+            <td>Summary honours channel preferences</td>
+            <td>Preference integration</td>
+            <td>Email muted → 0 provider calls; in-app message created; summary delivered via in-app only</td>
+            <td><span class="badge pass">PASS</span></td>
+          </tr>
+          <tr>
+            <td>6</td>
+            <td>Critical workflow and event-level priority bypass; other users unaffected</td>
+            <td>Critical bypass + per-user isolation</td>
+            <td>Alice (focus on): 2 delivered (critical workflow + <code>priority:critical</code> event); Bob (no focus): 3 delivered</td>
+            <td><span class="badge pass">PASS</span></td>
+          </tr>
+          <tr>
+            <td>7</td>
+            <td>Input validation and state rules</td>
+            <td>API boundary validation</td>
+            <td>Missing duration → 400; invalid format → 400; zero duration → 400; &gt;24 h → 400; duplicate start → 409; unauthenticated → 401</td>
+            <td><span class="badge pass">PASS</span></td>
+          </tr>
+          <tr>
+            <td>8</td>
+            <td>Users who never use it see no change</td>
+            <td>Backward compatibility</td>
+            <td>Digest fires correctly; retry fires correctly; <code>held_events</code> table stays empty</td>
+            <td><span class="badge pass">PASS</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 id="s2-5">2.5 Proof: killer test results</h3>
+    <p>Focus Mode must not break the three killer test behaviors. The three killer test suites ran with Focus Mode active. All 16 killer tests passed.</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Killer test</th><th>Tests run</th><th>Tests passed</th><th>Interaction with Focus Mode</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>KT1</strong> — Ten events in 5 min arrive as one digest</td>
+            <td>4</td><td><span class="badge pass">4 PASS</span></td>
+            <td>Focus Mode and digest use different mechanisms. Focus test 8 explicitly confirms that digest fires correctly when the student does not activate Focus Mode. No held events are created for non-focus users.</td>
+          </tr>
+          <tr>
+            <td><strong>KT2</strong> — Muted email user receives in-app only</td>
+            <td>5</td><td><span class="badge pass">5 PASS</span></td>
+            <td>Focus test 5 re-runs this exact scenario through the focus path. The summary respects the email mute preference. The original KT2 suite confirms that non-focus preference behavior is unchanged.</td>
+          </tr>
+          <tr>
+            <td><strong>KT3</strong> — Failed send retried without duplicates</td>
+            <td>7</td><td><span class="badge pass">7 PASS</span></td>
+            <td>Focus Mode defers jobs at the step level (status <code>deferred</code>). When Focus Mode ends, the job resumes through the same delivery executor. The executor enforces the idempotency key. The no-duplicate guarantee is preserved.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout fixed">
+      <strong>Conclusion</strong>
+      <p>Intelligent Focus Mode is fully operational. All 8 feature tests pass. All 16 killer tests pass with Focus Mode active. The feature is backward compatible: students who do not activate it see no change in behavior.</p>
+    </div>
+  </div>
+
+  <!-- FINAL SUMMARY -->
+  <div class="section" style="border-top: none;">
+    <p class="section-eyebrow">Summary</p>
+    <h2 class="section-title">Total Test Evidence</h2>
+
+    <div class="summary-row">
+      <div class="stat-box"><div class="stat-n green">33</div><div class="stat-label">Total Tests Run</div></div>
+      <div class="stat-box"><div class="stat-n green">33</div><div class="stat-label">Total Passed</div></div>
+      <div class="stat-box"><div class="stat-n">0</div><div class="stat-label">Failed</div></div>
+      <div class="stat-box"><div class="stat-n green">100%</div><div class="stat-label">Pass Rate</div></div>
+    </div>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Suite</th><th>Test count</th><th>Scope</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Webhook fix (FIX)</td><td>9</td><td>All 5 verification outcomes, audit trail, scheme coverage</td><td><span class="badge pass">9 / 9 PASS</span></td></tr>
+          <tr><td>Killer Test 1 (KT1)</td><td>4</td><td>Digest window, uniqueness constraint, per-subscriber isolation, late-event window</td><td><span class="badge pass">4 / 4 PASS</span></td></tr>
+          <tr><td>Killer Test 2 (KT2)</td><td>5</td><td>Channel mute, late mute, workflow override, critical bypass, input validation</td><td><span class="badge pass">5 / 5 PASS</span></td></tr>
+          <tr><td>Killer Test 3 (KT3)</td><td>7</td><td>Retry success, ambiguous delivery, naive provider, retry exhaustion, permanent error, crash recovery, DB constraint</td><td><span class="badge pass">7 / 7 PASS</span></td></tr>
+          <tr><td>Focus Mode (FOCUS)</td><td>8</td><td>Full lifecycle, correlation, suppression, timer/manual end, preference integration, critical bypass, validation, backward compat.</td><td><span class="badge pass">8 / 8 PASS</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
