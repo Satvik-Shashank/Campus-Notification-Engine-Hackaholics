@@ -3,6 +3,16 @@
 const { HttpError, parseJson } = require('../util');
 
 const STEP_TYPES = ['digest', 'email', 'in-app'];
+const CATEGORIES = ['academic', 'campus', 'events', 'administrative', 'clubs'];
+const PRIORITIES = ['low', 'normal', 'high', 'critical'];
+
+function normalizeAction(a, field) {
+  if (a == null) return null;
+  if (typeof a !== 'object' || typeof a.label !== 'string' || !a.label || (a.url != null && typeof a.url !== 'string')) {
+    throw new HttpError(400, 'BadRequest', `${field} must be {label, url?}.`);
+  }
+  return { label: a.label, url: a.url || null };
+}
 const RULE_OPS = { lt: (a, b) => a < b, lte: (a, b) => a <= b, gt: (a, b) => a > b, gte: (a, b) => a >= b, eq: (a, b) => a === b };
 
 /** Validate and normalise a workflow definition from the admin API or the seed. */
@@ -19,7 +29,13 @@ function normalizeDefinition(identifier, def, config) {
       if (i !== 0) throw new HttpError(400, 'BadRequest', 'A digest step is only supported as the first step.');
       const windowMs = s.windowMs ?? config.digestWindowMs;
       if (!Number.isInteger(windowMs) || windowMs <= 0) throw new HttpError(400, 'BadRequest', 'digest windowMs must be a positive integer.');
-      return { type: 'digest', windowMs, digestKey: s.digestKey || null };
+      if (s.groupScope != null && (typeof s.groupScope !== 'string' || !/^[a-z0-9_-]{1,40}$/.test(s.groupScope))) {
+        throw new HttpError(400, 'BadRequest', 'digest groupScope must match [a-z0-9_-]{1,40}.');
+      }
+      const out = { type: 'digest', windowMs, digestKey: s.digestKey || null };
+      // Optional cross-workflow grouping (G8): digest steps sharing a groupScope share one master.
+      if (s.groupScope) out.groupScope = s.groupScope;
+      return out;
     }
     return { type: s.type, subject: String(s.subject ?? ''), body: String(s.body ?? '') };
   });
@@ -28,10 +44,17 @@ function normalizeDefinition(identifier, def, config) {
   if (!Array.isArray(rules) || rules.some((r) => !r || typeof r.field !== 'string' || !RULE_OPS[r.op] || r.value === undefined)) {
     throw new HttpError(400, 'BadRequest', `criticalRules must be [{field, op (${Object.keys(RULE_OPS).join('|')}), value}].`);
   }
+  if (def.category != null && !CATEGORIES.includes(def.category)) throw new HttpError(400, 'BadRequest', `category must be one of ${CATEGORIES.join(', ')}.`);
+  if (def.priority != null && !PRIORITIES.includes(def.priority)) throw new HttpError(400, 'BadRequest', `priority must be one of ${PRIORITIES.join(', ')}.`);
   return {
     identifier,
     steps,
-    critical: def.critical ? 1 : 0,
+    name: typeof def.name === 'string' && def.name ? def.name : null,
+    description: typeof def.description === 'string' ? def.description : null,
+    category: def.category || 'campus',
+    priority: def.critical ? 'critical' : (def.priority || 'normal'),
+    actions: { primary: normalizeAction(def.primaryAction, 'primaryAction'), secondary: normalizeAction(def.secondaryAction, 'secondaryAction') },
+    critical: def.critical || def.priority === 'critical' ? 1 : 0,
     correlationKey: def.correlationKey || null,
     criticalRules: rules,
   };
@@ -47,6 +70,12 @@ function createWorkflows(ctx) {
     critical: !!row.critical,
     correlationKey: row.correlation_key,
     criticalRules: parseJson(row.critical_rules, []),
+    name: row.name || row.identifier,
+    description: row.description || '',
+    category: row.category || 'campus',
+    priority: row.priority || 'normal',
+    primaryAction: (parseJson(row.actions, {}) || {}).primary || null,
+    secondaryAction: (parseJson(row.actions, {}) || {}).secondary || null,
   });
 
   return {
@@ -54,11 +83,15 @@ function createWorkflows(ctx) {
       const n = normalizeDefinition(identifier, def, ctx.config);
       const now = clock.now();
       db.run(
-        `INSERT INTO workflows (identifier, steps, critical, correlation_key, critical_rules, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?)
+        `INSERT INTO workflows (identifier, steps, critical, correlation_key, critical_rules, name, description, category, priority,
+           actions, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(identifier) DO UPDATE SET steps=excluded.steps, critical=excluded.critical,
-           correlation_key=excluded.correlation_key, critical_rules=excluded.critical_rules, updated_at=excluded.updated_at`,
-        n.identifier, JSON.stringify(n.steps), n.critical, n.correlationKey, JSON.stringify(n.criticalRules), now, now,
+           correlation_key=excluded.correlation_key, critical_rules=excluded.critical_rules, name=excluded.name,
+           description=excluded.description, category=excluded.category, priority=excluded.priority,
+           actions=excluded.actions, updated_at=excluded.updated_at`,
+        n.identifier, JSON.stringify(n.steps), n.critical, n.correlationKey, JSON.stringify(n.criticalRules), n.name,
+        n.description, n.category, n.priority, JSON.stringify(n.actions), now, now,
       );
       return this.getByIdentifier(identifier);
     },
@@ -89,4 +122,4 @@ function createWorkflows(ctx) {
   };
 }
 
-module.exports = { createWorkflows, normalizeDefinition };
+module.exports = { createWorkflows, normalizeDefinition, CATEGORIES, PRIORITIES };

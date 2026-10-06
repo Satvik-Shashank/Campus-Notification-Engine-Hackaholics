@@ -18,7 +18,12 @@ test('RELIABILITY: fan-out spans chunks and every recipient gets exactly one not
   assert.equal(r.body.recipientCount, 250);
   await h.tick();
   assert.equal(h.db.get('SELECT COUNT(*) AS n FROM notifications').n, 250);
+  // G6: the default 100 emails/s bucket spreads the burst out instead of hammering the provider.
+  assert.equal(h.provider.delivered.length, 100);
+  for (let i = 0; i < 3; i += 1) await h.advance(1000);
   assert.equal(h.provider.delivered.length, 250);
+  assert.equal(h.provider.calls.length, 250, 'throttled jobs never reached the provider early');
+  assert.equal(h.db.get(`SELECT MAX(attempts) AS n FROM jobs WHERE step_type='email'`).n, 1, 'throttling used no attempts');
   assert.equal(h.db.get(`SELECT COUNT(*) AS n FROM messages WHERE channel='in-app'`).n, 250);
   assert.equal(h.db.get(`SELECT COUNT(*) AS n FROM event_recipients WHERE state != 'done'`).n, 0);
 });

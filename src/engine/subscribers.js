@@ -38,6 +38,10 @@ function createSubscribers(ctx) {
            last_name = COALESCE(excluded.last_name, last_name), updated_at = excluded.updated_at`,
         externalId, fields.email ?? null, fields.firstName ?? null, fields.lastName ?? null, now, now,
       );
+      if (fields.department !== undefined || fields.year !== undefined || fields.program !== undefined) {
+        db.run(`UPDATE subscribers SET department = COALESCE(?, department), year = COALESCE(?, year), program = COALESCE(?, program)
+                WHERE external_id = ?`, fields.department ?? null, fields.year ?? null, fields.program ?? null, externalId);
+      }
       return byExternal(externalId);
     },
 
@@ -54,6 +58,40 @@ function createSubscribers(ctx) {
       });
     },
 
+    audienceMembers: (topics) => db.all(
+      `SELECT DISTINCT s.external_id FROM topic_members t JOIN subscribers s ON s.id = t.subscriber_id
+       WHERE t.topic IN (${topics.map(() => '?').join(',')}) ORDER BY s.id`, ...topics,
+    ).map((r) => r.external_id),
+    audienceSize: (topics) => (topics.length ? db.get(
+      `SELECT COUNT(DISTINCT subscriber_id) AS n FROM topic_members WHERE topic IN (${topics.map(() => '?').join(',')})`, ...topics,
+    ).n : 0),
+
+    upsertTopic(key, meta = {}) {
+      if (!key || typeof key !== 'string' || !/^[\w:.-]{1,80}$/.test(key)) throw new HttpError(400, 'BadRequest', 'Invalid topic key.');
+      if (typeof meta.name !== 'string' || !meta.name) throw new HttpError(400, 'BadRequest', 'Topic name is required.');
+      db.run(
+        `INSERT INTO topics (key, name, description, kind, followable, created_at) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(key) DO UPDATE SET name = excluded.name, description = excluded.description, kind = excluded.kind,
+           followable = excluded.followable`,
+        key, meta.name, meta.description ?? null, meta.kind || 'interest', meta.followable === false ? 0 : 1, clock.now(),
+      );
+      return db.get('SELECT * FROM topics WHERE key = ?', key);
+    },
+
+    follow(subscriber, key, on) {
+      const t = db.get('SELECT * FROM topics WHERE key = ?', key);
+      if (!t) throw new HttpError(404, 'NotFound', 'Topic not found.');
+      if (!t.followable) throw new HttpError(409, 'Conflict', 'This group is assigned by the university and cannot be changed here.');
+      if (on) db.run('INSERT OR IGNORE INTO topic_members (topic, subscriber_id) VALUES (?,?)', key, subscriber.id);
+      else db.run('DELETE FROM topic_members WHERE topic = ? AND subscriber_id = ?', key, subscriber.id);
+      return { topic: key, following: !!on };
+    },
+
+    setCategoryPreferences(subscriber, category, patch) {
+      upsertPref(subscriber.id, 'workflow', `category:${category}`, patch);
+      return this.getPreferences(subscriber).categories[category];
+    },
+
     topicMembers: (topic) => db.all(
       `SELECT s.external_id FROM topic_members t JOIN subscribers s ON s.id = t.subscriber_id
        WHERE t.topic = ? ORDER BY s.id`, topic,
@@ -64,11 +102,12 @@ function createSubscribers(ctx) {
 
     /** Public view used by GET /inbox/preferences. */
     getPreferences(subscriber) {
-      const out = { subscriberId: subscriber.external_id, global: { email: true, inApp: true }, workflows: {} };
+      const out = { subscriberId: subscriber.external_id, global: { email: true, inApp: true }, workflows: {}, categories: {} };
       for (const r of prefRows(subscriber.id)) {
         const view = {};
         for (const [name, col] of CHANNELS) if (r[col] !== null) view[name] = !!r[col];
         if (r.scope === 'global') Object.assign(out.global, view);
+        else if (r.workflow_key.startsWith('category:')) out.categories[r.workflow_key.slice(9)] = view;
         else out.workflows[r.workflow_key] = view;
       }
       return out;
@@ -94,15 +133,17 @@ function createSubscribers(ctx) {
 
     /**
      * Effective channel switches, evaluated when a job runs (not at trigger time).
-     * Order: workflow override > global > default true. Workflow-level `critical` or a preference
+     * Order: workflow override > category > global > default true. Workflow-level `critical` or a preference
      * row flagged read_only force every channel on.
      */
     resolve(subscriberId, workflow) {
       const rows = prefRows(subscriberId);
       const global = rows.find((r) => r.scope === 'global');
       const wf = rows.find((r) => r.scope === 'workflow' && r.workflow_key === workflow.identifier);
+      const cat = rows.find((r) => r.scope === 'workflow' && r.workflow_key === `category:${workflow.category || 'campus'}`);
       const pick = (col) => {
         if (wf && wf[col] !== null) return !!wf[col];
+        if (cat && cat[col] !== null) return !!cat[col];
         if (global && global[col] !== null) return !!global[col];
         return true;
       };

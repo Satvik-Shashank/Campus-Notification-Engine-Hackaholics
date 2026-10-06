@@ -1,9 +1,12 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const { openDatabase } = require('../db');
 const { createLogger } = require('../logger');
-const { createEmailProvider } = require('../providers/email');
+const { createEmailProvider, createFaultInjector } = require('../providers/email');
+const { createProviderGuard } = require('../providers/guard');
+const { createDeadLetters } = require('./deadletters');
 const { createActivity } = require('./activity');
 const { createWorkflows } = require('./workflows');
 const { createSubscribers } = require('./subscribers');
@@ -21,15 +24,36 @@ const systemClock = { now: () => Date.now() };
  */
 function createEngine({ config, db, clock = systemClock, emailProvider, logger } = {}) {
   const log = logger || createLogger('info');
+  let provider = emailProvider || createEmailProvider(config, log);
+  // Demo mode only: let the operator inject provider failures from the Demo Lab.
+  const faults = config.demoMode ? createFaultInjector(provider) : null;
+  if (faults) provider = faults;
+  if (config.demoMode && !config.webhookSecrets.generic) {
+    // A per-process secret so the Demo Lab can show a valid signature without anyone configuring one.
+    config.webhookSecrets.generic = crypto.randomBytes(24).toString('hex');
+  }
   const ctx = {
     config,
     db: db || openDatabase(config.dbPath),
     clock,
     logger: log,
     bus: new EventEmitter(),
-    emailProvider: emailProvider || createEmailProvider(config, log),
+    emailProvider: provider,
+    faults,
   };
+  ctx.bus.setMaxListeners(1000);
   ctx.activity = createActivity(ctx);
+  ctx.providerGuard = createProviderGuard({
+    clock,
+    ratePerSec: config.emailRatePerSec,
+    threshold: config.emailBreakerThreshold,
+    cooldownMs: config.emailBreakerCooldownMs,
+    onTransition: ({ from, to, reason }) => {
+      const event = { open: 'circuit_opened', half_open: 'circuit_half_open', closed: 'circuit_closed' }[to];
+      ctx.activity.log({ event, status: to === 'open' ? 'failure' : 'info', message: `Email provider circuit ${from} -> ${to}: ${reason}` });
+      log.warn('provider circuit transition', { from, to, reason });
+    },
+  });
   ctx.workflows = createWorkflows(ctx);
   ctx.subscribers = createSubscribers(ctx);
   ctx.pipeline = createPipeline(ctx);
@@ -37,6 +61,7 @@ function createEngine({ config, db, clock = systemClock, emailProvider, logger }
   ctx.ingest = createIngest(ctx);
   ctx.webhooks = createWebhooks(ctx);
   ctx.queries = createQueries(ctx);
+  ctx.deadLetters = createDeadLetters(ctx);
 
   // The catch-up summary is delivered like any other notification, through this internal workflow.
   ctx.workflows.upsert(SUMMARY_WORKFLOW, {

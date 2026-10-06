@@ -4,6 +4,7 @@ const { loadConfig } = require('../src/config');
 const { createLogger } = require('../src/logger');
 const { createEngine } = require('../src/engine');
 const { createApp } = require('../src/http/app');
+const { attachRealtime } = require('../src/http/realtime');
 const { ProviderError } = require('../src/providers/email');
 
 const API_KEY = 'test-key';
@@ -71,6 +72,7 @@ async function createHarness({ provider, config = {} } = {}) {
   const server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
+  const realtime = attachRealtime(server, engine);
   const base = `http://127.0.0.1:${server.address().port}`;
 
   async function http(method, path, { body, key, token, headers = {}, rawBody } = {}) {
@@ -121,7 +123,10 @@ async function createHarness({ provider, config = {} } = {}) {
       return h.api('POST', '/events/trigger', { transactionId, workflowIdentifier, to, payload, ...extra });
     },
     explicit: (...ids) => ({ type: 'explicit', subscriberIds: ids }),
+    base,
+    realtime,
     async close() {
+      realtime.close();
       await new Promise((resolve) => server.close(resolve));
       await engine.close();
     },

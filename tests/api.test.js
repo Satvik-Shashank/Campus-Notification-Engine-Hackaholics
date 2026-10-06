@@ -307,3 +307,24 @@ test('UI: the demo console is served at / and has no inline secrets', async (t) 
   assert.ok(!r.text.includes(API_KEY));
   assert.ok(!r.text.includes('campus-admin-api-key-change-in-production'));
 });
+
+test('INBOX: archive is scoped to the owner and filterable', async (t) => {
+  const h = await setup(2);
+  t.after(() => h.close());
+  await h.trigger('arc-1', 'grade-alerts', h.explicit('student_001'), { course: 'A', grade: '1' });
+  await h.trigger('arc-2', 'grade-alerts', h.explicit('student_001'), { course: 'B', grade: '2' });
+  await h.tick();
+  const alice = await h.asUser('student_001');
+  const bob = await h.asUser('student_002');
+  const [first] = (await alice('GET', '/inbox/notifications')).body.notifications;
+  assert.equal((await bob('PATCH', `/inbox/notifications/${first.messageId}/archived`, { archived: true })).status, 404, "cannot archive someone else's");
+  assert.equal((await alice('PATCH', `/inbox/notifications/${first.messageId}/archived`, { archived: 'yes' })).status, 400);
+  assert.equal((await alice('PATCH', `/inbox/notifications/${first.messageId}/archived`, { archived: true })).status, 200);
+  assert.equal((await alice('GET', '/inbox/notifications?archived=false')).body.total, 1);
+  const archived = (await alice('GET', '/inbox/notifications?archived=true')).body;
+  assert.equal(archived.total, 1);
+  assert.equal(archived.notifications[0].seen, true, 'archiving marks as read');
+  assert.equal((await alice('GET', '/inbox/notifications?archived=maybe')).status, 400);
+  await alice('PATCH', `/inbox/notifications/${first.messageId}/archived`, { archived: false });
+  assert.equal((await alice('GET', '/inbox/notifications?archived=false')).body.total, 2);
+});

@@ -237,20 +237,115 @@ CREATE TABLE IF NOT EXISTS focus_summaries (
 );
 `;
 
+/**
+ * Numbered migrations, tracked with PRAGMA user_version. Migration 1 is the original schema written
+ * with IF NOT EXISTS, so databases created before versioning existed (user_version 0) upgrade in place.
+ * Never edit a released migration; append a new one.
+ */
+const MIGRATIONS = [
+  SCHEMA,
+  // 2: dead-letter queue (G7) and cross-workflow digest scope (G8).
+  `
+  CREATE TABLE IF NOT EXISTS dead_letters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+    notification_id INTEGER NOT NULL,
+    subscriber_id INTEGER NOT NULL,
+    workflow_id INTEGER NOT NULL,
+    transaction_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    last_error TEXT,
+    attempts INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','retried','dismissed')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    resolved_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_dead_letters_status ON dead_letters(status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_dead_letters_txn ON dead_letters(transaction_id);
+
+  ALTER TABLE jobs ADD COLUMN digest_scope TEXT;
+  UPDATE jobs SET digest_scope = 'workflow:' || workflow_id WHERE step_type = 'digest';
+  DROP INDEX IF EXISTS uq_digest_master;
+  -- One DELAYED master per (subscriber, digest scope, key, value). The scope defaults to the workflow,
+  -- so behaviour is unchanged unless a digest step names a cross-workflow group.
+  CREATE UNIQUE INDEX uq_digest_master
+    ON jobs(subscriber_id, digest_scope, digest_key, digest_value)
+    WHERE step_type = 'digest' AND status = 'delayed';
+  `,
+  // 3: indexes that let the worker claim jobs without scanning the table (found by the 30k benchmark).
+  `
+  CREATE INDEX IF NOT EXISTS idx_jobs_retry ON jobs(status, next_retry_at);
+  CREATE INDEX IF NOT EXISTS idx_jobs_lock ON jobs(status, locked_at);
+  CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, run_at, id);
+  `,
+  // 4: product metadata: workflow category/priority/actions, student profile, topic catalogue, engagement.
+  `
+  ALTER TABLE workflows ADD COLUMN name TEXT;
+  ALTER TABLE workflows ADD COLUMN description TEXT;
+  ALTER TABLE workflows ADD COLUMN category TEXT NOT NULL DEFAULT 'campus';
+  ALTER TABLE workflows ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal';
+  ALTER TABLE workflows ADD COLUMN actions TEXT;
+  ALTER TABLE subscribers ADD COLUMN department TEXT;
+  ALTER TABLE subscribers ADD COLUMN year INTEGER;
+  ALTER TABLE subscribers ADD COLUMN program TEXT;
+  ALTER TABLE messages ADD COLUMN read_at INTEGER;
+  ALTER TABLE messages ADD COLUMN clicked_at INTEGER;
+  CREATE TABLE IF NOT EXISTS topics (
+    key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    kind TEXT NOT NULL DEFAULT 'interest',
+    followable INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+  );
+  `,
+];
+
+function migrate(raw) {
+  const current = raw.prepare('PRAGMA user_version').get().user_version;
+  for (let v = current; v < MIGRATIONS.length; v += 1) {
+    raw.exec('BEGIN IMMEDIATE');
+    try {
+      raw.exec(MIGRATIONS[v]);
+      raw.exec(`PRAGMA user_version = ${v + 1}`);
+      raw.exec('COMMIT');
+    } catch (err) {
+      raw.exec('ROLLBACK');
+      throw new Error(`migration ${v + 1} failed: ${err.message}`);
+    }
+  }
+  return MIGRATIONS.length;
+}
+
 /** SQLite wrapper with nested-safe transactions (BEGIN IMMEDIATE + savepoints). */
 function openDatabase(dbPath = ':memory:') {
   if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const raw = new DatabaseSync(dbPath);
   raw.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
-  if (dbPath !== ':memory:') raw.exec('PRAGMA journal_mode = WAL;');
-  raw.exec(SCHEMA);
+  // WAL + synchronous=NORMAL: no corruption risk and no lost commits on a process crash; only an OS
+  // crash or power cut can drop the last few commits. Avoids an fsync per transaction.
+  if (dbPath !== ':memory:') raw.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;');
+  migrate(raw);
+
+  // Prepared-statement cache: every query string is compiled once, not on every call.
+  const statements = new Map();
+  const stmt = (sql) => {
+    let s = statements.get(sql);
+    if (!s) {
+      s = raw.prepare(sql);
+      if (statements.size < 500) statements.set(sql, s);
+    }
+    return s;
+  };
 
   let depth = 0;
   return {
     raw,
-    run: (sql, ...params) => raw.prepare(sql).run(...params),
-    get: (sql, ...params) => raw.prepare(sql).get(...params),
-    all: (sql, ...params) => raw.prepare(sql).all(...params),
+    run: (sql, ...params) => stmt(sql).run(...params),
+    get: (sql, ...params) => stmt(sql).get(...params),
+    all: (sql, ...params) => stmt(sql).all(...params),
     /** Run fn atomically; rolls back and rethrows on error. Nested calls use savepoints. */
     tx(fn) {
       const outer = depth === 0;
@@ -274,4 +369,4 @@ function openDatabase(dbPath = ':memory:') {
 
 const isUniqueViolation = (err) => /UNIQUE constraint failed/i.test(String(err && err.message));
 
-module.exports = { openDatabase, isUniqueViolation };
+module.exports = { openDatabase, isUniqueViolation, SCHEMA_VERSION: MIGRATIONS.length, BASELINE_SCHEMA: SCHEMA };

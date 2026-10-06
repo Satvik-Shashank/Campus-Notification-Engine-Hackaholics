@@ -5,6 +5,7 @@ const { loadConfig, assertSafeForProduction } = require('./config');
 const { createLogger } = require('./logger');
 const { createEngine } = require('./engine');
 const { createApp } = require('./http/app');
+const { attachRealtime } = require('./http/realtime');
 
 if (fs.existsSync('.env') && typeof process.loadEnvFile === 'function') process.loadEnvFile('.env');
 
@@ -22,7 +23,10 @@ const server = app.listen(config.port, () => {
   });
 });
 
+const realtime = attachRealtime(server, engine);
+
 const shutdown = async () => {
+  realtime.close();
   server.close();
   await engine.close();
   process.exit(0);

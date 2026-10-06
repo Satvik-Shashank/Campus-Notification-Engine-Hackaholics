@@ -6,11 +6,13 @@
  * Failures must be thrown as ProviderError so the engine can tell transient from permanent.
  */
 class ProviderError extends Error {
-  constructor(message, { transient = true, status = null } = {}) {
+  constructor(message, { transient = true, status = null, retryAfterMs = null } = {}) {
     super(message);
     this.name = 'ProviderError';
     this.transient = transient;
     this.status = status;
+    /** For 429 responses: how long the provider asked us to wait. */
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -77,4 +79,32 @@ function createEmailProvider(config, logger) {
   return config.smtp.host ? createSmtpProvider(config.smtp) : createConsoleProvider({ logger });
 }
 
-module.exports = { ProviderError, isTransientStatus, createConsoleProvider, createSmtpProvider, createEmailProvider };
+/**
+ * DEMO_MODE only: wraps a provider so an operator can make the next N sends fail on purpose
+ * (to show KT3 retries or the dead-letter queue live). Never installed outside demo mode.
+ */
+function createFaultInjector(inner) {
+  const armed = [];
+  return {
+    name: `${inner.name}+faults`,
+    inner,
+    arm(count, kind = 'transient') {
+      for (let i = 0; i < count; i += 1) armed.push(kind);
+      return armed.length;
+    },
+    clear() {
+      armed.length = 0;
+    },
+    pending: () => armed.length,
+    async send(msg) {
+      const kind = armed.shift();
+      if (kind === 'transient') throw new ProviderError('injected failure: provider returned 500', { transient: true, status: 500 });
+      if (kind === 'permanent') throw new ProviderError('injected failure: mailbox does not exist (550)', { transient: false, status: 550 });
+      return inner.send(msg);
+    },
+  };
+}
+
+module.exports = {
+  ProviderError, isTransientStatus, createConsoleProvider, createSmtpProvider, createEmailProvider, createFaultInjector,
+};

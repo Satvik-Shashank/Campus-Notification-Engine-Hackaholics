@@ -12,7 +12,7 @@ const browserGlobals = {
 };
 
 module.exports = [
-  { ignores: ['node_modules/**', 'data/**'] },
+  { ignores: ['node_modules/**', 'data/**', 'web/**', 'public/**'] },
   {
     files: ['**/*.js'],
     languageOptions: { ecmaVersion: 2023, sourceType: 'commonjs', globals: nodeGlobals },

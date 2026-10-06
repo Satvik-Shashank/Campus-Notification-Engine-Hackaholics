@@ -1,0 +1,104 @@
+@import 'tailwindcss';
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/source-serif-4/600.css';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Design tokens. Light is the default; .dark on <html> swaps them. */
+:root {
+  --c-paper: #f7f7fc;
+  --c-surface: #ffffff;
+  --c-sunken: #f1f5f9;
+  --c-ink: #0f172a;
+  --c-muted: #64748b;
+  --c-line: #e2e8f0;
+  --c-primary: #4f46e5;
+  --c-primary-ink: #ffffff;
+  --c-primary-soft: #eef2ff;
+  --c-accent: #e8590c;
+  --c-accent-soft: #fff1e8;
+  --c-gold: #f59e0b;
+  --c-ok: #047857;
+  --c-ok-soft: #dcfce7;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-fail: #dc2626;
+  --c-fail-soft: #fee2e2;
+  --c-info: #2563eb;
+  --c-info-soft: #dbeafe;
+}
+.dark {
+  --c-paper: #0a1128;
+  --c-surface: #111a35;
+  --c-sunken: #0e1630;
+  --c-ink: #e8ecf8;
+  --c-muted: #94a3b8;
+  --c-line: #22305a;
+  --c-primary: #818cf8;
+  --c-primary-ink: #0a1128;
+  --c-primary-soft: #1e2350;
+  --c-accent: #fb923c;
+  --c-accent-soft: #3b1d10;
+  --c-gold: #fbbf24;
+  --c-ok: #34d399;
+  --c-ok-soft: #0f2f22;
+  --c-warn: #fbbf24;
+  --c-warn-soft: #3a2a0f;
+  --c-fail: #f87171;
+  --c-fail-soft: #3d1715;
+  --c-info: #60a5fa;
+  --c-info-soft: #14284a;
+}
+
+@theme {
+  --color-paper: var(--c-paper);
+  --color-surface: var(--c-surface);
+  --color-sunken: var(--c-sunken);
+  --color-ink: var(--c-ink);
+  --color-muted: var(--c-muted);
+  --color-line: var(--c-line);
+  --color-primary: var(--c-primary);
+  --color-primary-ink: var(--c-primary-ink);
+  --color-primary-soft: var(--c-primary-soft);
+  --color-accent: var(--c-accent);
+  --color-accent-soft: var(--c-accent-soft);
+  --color-gold: var(--c-gold);
+  --color-ok: var(--c-ok);
+  --color-ok-soft: var(--c-ok-soft);
+  --color-warn: var(--c-warn);
+  --color-warn-soft: var(--c-warn-soft);
+  --color-fail: var(--c-fail);
+  --color-fail-soft: var(--c-fail-soft);
+  --color-info: var(--c-info);
+  --color-info-soft: var(--c-info-soft);
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-display: 'Inter', system-ui, sans-serif;
+}
+
+html, body, #root { min-height: 100%; }
+@keyframes cne-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.cne-fade { animation: cne-fade 160ms ease-out; }
+@keyframes cne-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.cne-marquee { animation: cne-marquee 40s linear infinite; }
+body {
+  background-color: var(--c-paper);
+  /* One soft indigo wash top-right, fixed behind everything, plus a true paper-fibre grain —
+     restrained, single-hue, appropriate to a campus notice board rather than a product demo. */
+  background-image:
+    radial-gradient(900px 500px at 100% 0%, color-mix(in srgb, var(--c-primary) 7%, transparent), transparent 70%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.05'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: auto, 180px 180px;
+  background-attachment: fixed, fixed;
+  color: var(--c-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+:focus-visible { outline: 2px solid var(--c-primary); outline-offset: 2px; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}

@@ -24,7 +24,7 @@ function loadConfig(env = process.env, overrides = {}) {
     m = /^WEBHOOK_ALLOW_UNVERIFIED_(.+)$/.exec(key);
     if (m) allowUnverified[m[1].toLowerCase()] = value === 'true';
   }
-  return {
+  const config = {
     port: int(env.PORT, 3000),
     nodeEnv: env.NODE_ENV || 'development',
     dbPath: env.DB_PATH || './data/campus.db',
@@ -54,13 +54,21 @@ function loadConfig(env = process.env, overrides = {}) {
     webhookAllowUnverified: allowUnverified,
     webhookToleranceS: int(env.WEBHOOK_TIMESTAMP_TOLERANCE_S, 300),
     focusMaxHours: int(env.FOCUS_MODE_MAX_HOURS, 24),
+    emailRatePerSec: int(env.EMAIL_RATE_PER_SEC, 100),
+    emailBreakerThreshold: int(env.EMAIL_BREAKER_THRESHOLD, 5),
+    emailBreakerCooldownMs: int(env.EMAIL_BREAKER_COOLDOWN_MS, 30000),
+    demoMode: env.DEMO_MODE === 'true',
     ...overrides,
   };
+  // Demo mode lets students sign in without the API key unless the operator chose otherwise.
+  if (config.demoMode && !env.INBOX_SESSION_AUTH && !('inboxSessionAuth' in overrides)) config.inboxSessionAuth = 'public';
+  return config;
 }
 
 /** Refuse to boot in production with the shipped placeholder secrets. */
 function assertSafeForProduction(config) {
   if (config.nodeEnv !== 'production') return;
+  if (config.demoMode) throw new Error('Refusing to start in production with DEMO_MODE=true');
   if (config.apiKey === DEFAULT_API_KEY || config.jwtSecret === DEFAULT_JWT_SECRET) {
     throw new Error('Refusing to start in production with placeholder API_KEY/JWT_SECRET');
   }

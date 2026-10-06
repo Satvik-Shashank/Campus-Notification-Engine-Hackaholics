@@ -1,167 +1,248 @@
-# Campus Notification Engine
+<div align="center">
 
-A clean-room rebuild for HACKBACK V2. An important campus event (say, an exam timetable change) fans out to many students quickly, without spamming them, respecting their channel preferences, and without losing or duplicating messages.
+# Concourse
 
-It was built only from the seven documents in `../docs/`. Where those documents were silent or contradicted each other, the choice is recorded under [Implementation assumptions](#implementation-assumptions).
+**Campus notifications for SRM University**
 
-## What it does
+The exam moved. Every student knows — and nobody got ten emails about it.
 
-- **Ingest** events over HTTP (`202 Accepted`), de-duplicated by `transactionId` for 24h.
-- **Fan out** to explicit subscriber lists, topics, or everyone, in chunks of 100, with progress persisted so a failed fan-out resumes instead of dropping people.
-- **Digest**: a workflow's digest step groups events per (subscriber, workflow, digest value) inside a window. The first event is the master, the rest merge into it, and one email plus one in-app message is delivered when the window closes.
-- **Preferences** (email / in-app, global or per workflow) are checked when the job runs, not when the event arrives. Critical workflows ignore mutes.
-- **Delivery**: email through a provider adapter, in-app messages in a per-user inbox.
-- **Retry**: bounded retries with backoff (1s, 5s, 15s, 3 attempts) for transient failures. A retry adds a delivery-attempt row and reuses the same idempotency key. It never creates a new notification or a second message.
-- **Fix, fail-closed inbound webhooks**: provider delivery callbacks are only trusted when their signature verifies.
-- **Differentiator, Intelligent Focus Mode**: time-boxed quiet periods with critical bypass and a correlated catch-up summary.
-- **Observability**: every step writes to an activity log (`GET /admin/activity`).
+[Quick start](#quick-start) · [Product tour](#product-tour) · [Architecture](#architecture) · [Verification](#verification) · [API](#api) · [Scale](#scale-measured)
 
-## Run it
+</div>
 
-Requires **Node.js 22.5 or newer** (it uses the built-in `node:sqlite`; developed on Node 26). No Redis or MongoDB is needed.
+---
+
+## About
+
+Concourse is a clean-room rebuild of a campus notification engine, built for HACKBACK V2 from a frozen seven-document specification (`../docs/`). It turns campus events — an exam room change, a closure, a fee deadline — into notifications that reach the right students fast, through the channels they chose, combined when they're related, and never lost or duplicated when something goes wrong.
+
+The spec documents were never edited. Where they were silent or contradicted each other, the decision made is recorded under [Implementation assumptions](#implementation-assumptions) rather than left implicit.
+
+## Quick start
+
+Requires **Node.js 22.5+** (uses the built-in `node:sqlite`; developed on Node 26). No Redis, MongoDB or Docker required.
 
 ```bash
 cd campus-notification-engine
 npm install
-cp .env.example .env        # optional; defaults work for local use
-npm run seed                # demo workflows + student_001..student_005
-npm start                   # http://localhost:3000
+npm run demo
 ```
 
-Open `http://localhost:3000`, enter the API key (default `campus-admin-api-key-change-in-production`) and a subscriber id such as `student_001`. The "Send / Activity" tab sends a test event to the signed-in student.
+This seeds a believable SRM campus — 5 departments, 8 courses, 4 clubs, 4 residences, 180 students, 11 workflows — and replays three days of campus events **through the real engine** on a controlled clock, so every digest, read receipt and delivery state in the UI is genuine, not a fixture. Then open:
 
-The server refuses to start with `NODE_ENV=production` while the placeholder `API_KEY` / `JWT_SECRET` are in use.
+| | URL | Sign in |
+|---|---|---|
+| **Landing** | `http://localhost:3000/` | — |
+| **Student portal** | `http://localhost:3000/app` | `student_001` (Aditi Rao, CSE, Year 3) |
+| **Staff console** | `http://localhost:3000/console` | API key — local default `campus-admin-api-key-change-in-production` |
 
-### Tests, lint, build
+For a plain (non-demo) run: `npm run seed && npm start`. The production UI build is committed in `public/`; after editing `web/`, rebuild with `npm run build:web`.
 
-```bash
-npm test            # all suites (58 tests, about 15 seconds)
-npm run test:kt1    # Killer Test 1: ten events -> one digest
-npm run test:kt2    # Killer Test 2: email muted -> in-app only
-npm run test:kt3    # Killer Test 3: failed send -> retry -> no duplicate
-npm run test:webhook
-npm run test:focus
-npm run lint        # eslint
-npm run build       # there is no compile step; this parses every source file
-```
+## Product tour
 
-The tests drive the real engine, a real SQLite database and the real HTTP server. Only two things are substituted: the **clock** (so a five-minute digest window takes microseconds) and the **email provider** (a scripted fake that can fail, and can behave like a provider that honours idempotency keys or like one that does not).
+### For students — `/app`
+
+- **Overview** — critical alerts pinned until opened, what needs attention, combined updates, upcoming dates, unread counts by category.
+- **Inbox** — All / Unread / Critical / Archived, category filter, search, sort, mark-all-read. Each notification opens into a detail view with a *What changed* table (Previous → Updated), the full sequence for combined updates, click-tracked actions, *why you received this*, delivery state and related notifications.
+- **Focus Mode** — hold everyday notifications for 30 min–4 h (or until a time); critical alerts still arrive; one catch-up summary — *"3 things changed"* — when the session ends.
+- **Topics** — follow or unfollow clubs and services; enrolled courses, department and residence groups show read-only.
+- **Preferences** — in-app and email, per category (Academic, Campus, Events, Administrative, Clubs), layered over sensible defaults.
+- **Profile**, and new notifications that arrive live over a WebSocket.
+
+### For staff — `/console`
+
+- **Compose** — pick the kind of event, write what happened, target any combination of departments, years, courses, clubs, residences and services, and watch a **live student-count estimate** and an exact preview of what students will receive — channels, timing, Focus Mode behaviour — before publishing.
+- **Overview** — *attention management* (delivered immediately, combined into digests, held by Focus Mode, suppressed as redundant, critical) and *engagement* (read and click-through rates, by category).
+- **Events** — per-student **delivery lifecycle**: event → audience → workflow → timing → preference check → Focus Mode → delivery attempts → read.
+- **Workflows**, shown as Event → Audience → Rules → Timing → Channels → Priority, plus Activity, Dead Letters, Provider Health, Subscribers and Webhooks.
+
+Critical notifications (closures, security alerts) are visually distinct, explain why they bypassed preferences and Focus Mode, and are enforced at the engine level, not just in the UI.
+
+## What it does
+
+| Capability | Detail |
+|---|---|
+| **Ingest** | `202 Accepted`, de-duplicated by `transactionId` for 24 h via a unique index (concurrent duplicates collapse too) |
+| **Fan-out** | explicit lists, topics or broadcast, chunked by 100, with per-recipient progress — a failed fan-out resumes instead of dropping people |
+| **Digest** | first event in a window becomes the master; later ones merge in; one message goes out when the window closes, guarded by a partial unique index. Digests can also merge **across workflows** via a shared `groupScope` |
+| **Preferences** | email / in-app, global or per category or per workflow, evaluated live on every send; critical workflows override mutes |
+| **Delivery** | email via a provider adapter; in-app messages stored and **pushed live over WebSocket**, with polling as a fallback |
+| **Retry** | 1 s / 5 s / 15 s backoff, 3 attempts, same idempotency key — never a new notification or message |
+| **Provider protection** | a 100/s token bucket and a circuit breaker (opens after 5 consecutive failures, probes after 30 s); a held send never spends an attempt |
+| **Dead-letter queue** | permanent failures and exhausted retries are parked with a reason; staff can retry (same job, same key — never a duplicate) or dismiss |
+| **Observability** | activity log, per-event delivery status, dashboards, provider health, webhook audit |
+
+Built with React 19, TypeScript, Vite and Tailwind 4, with self-hosted fonts (works offline). Light and dark themes, a responsive layout, keyboard focus states, `aria-live` announcements and a skip link. Credentials live only in `sessionStorage`; `localStorage` is used solely for the theme choice.
+
+## Live verification
+
+The three Killer Tests are automated (`npm run test:kt1`, `test:kt2`, `test:kt3`). For a live, clickable walkthrough, a **developer-only** page exists at `http://localhost:3000/internal/verify` — unlinked from the product and only served when `DEMO_MODE=true` (which `npm run demo` sets). Each card drives the real REST API and reads real database rows back to decide pass or fail.
+
+| Card | What happens |
+|---|---|
+| Killer Test 1 | 10 events, nothing delivered while the window is open → 1 email + 1 in-app containing all 10; `sent 1, digested 9` |
+| Killer Test 2 | student mutes email → email step `skipped`, zero provider attempts; in-app still delivered |
+| Killer Test 3 | provider fails once → attempt 1 fails (500), attempt 2 succeeds, same idempotency key, exactly 1 email |
+| Fix | 4 webhook requests — forged (401), unsigned (401), unverifiable provider (400), valid (200) — only the valid one changes state |
+| Differentiator | Focus on → 4 updates held → critical alert arrives anyway → session ends → one catch-up, redundant item suppressed |
+| G6 | 5 straight provider failures → circuit opens → held students keep their retry budget → after cooldown, all get exactly one email |
+| G7 | permanent failure → dead-letter queue → staff retry → exactly 1 email, history preserved |
+| G8 | three workflows sharing a digest group → 1 email naming all three |
+
+All eight pass in the headless browser suite (`npm run test:e2e`).
+
+## Fix — fail-closed webhook signatures
+
+`POST /webhooks/:provider` handles *inbound* provider delivery callbacks (not the producer API).
+
+| Situation | Response | Applied? |
+|---|---|---|
+| Valid signature | 200 | Yes |
+| Invalid signature, or stale timestamp | 401 | No |
+| Missing signature | 401 | No |
+| No verifier for the provider | 400 | No |
+| Verifier exists, no secret configured | 400 | No |
+| Unsupported provider + explicit `WEBHOOK_ALLOW_UNVERIFIED_<PROVIDER>=true` | 202, recorded `unverified` | No |
+
+Supported schemes: `generic` (HMAC-SHA256 over the raw body) and `mailgun` (HMAC-SHA256 of timestamp + token, with a tolerance window). Comparisons are constant-time; every request is audited without the signature or secret. Not covered: replay protection for the `generic` scheme, and verifiers for ECDSA-signed providers.
+
+## Differentiator — Intelligent Focus Mode
+
+While a session is active, non-critical deliveries are held. Critical ones arrive immediately — a `critical` workflow, `priority: "critical"`, or a rule like `minutesUntilExam < 30`. At session end, held events are grouped by the workflow's `correlationKey`; repeats are dropped, and facts already delivered by a critical alert (or read during the session) are suppressed. The student gets **one** catch-up notification through the normal pipeline, so mutes and retries still apply — it reports what changed (`room: A201 → H123`), not a replay of five messages.
 
 ## Architecture
 
 ```
-POST /events/trigger ──> events (persisted, 202)
-                           │  worker tick (every WORKER_TICK_MS, or engine.tick() in tests)
-                           ▼
-                 fan-out (chunks of 100, resumable: event_recipients)
-                           ▼
-        notifications  (UNIQUE per event + subscriber)  +  job chain
-                           ▼
-   digest ──> email ──> in-app          (jobs: queued / delayed / merged / retrying / ...)
-     │          │          │
-     │          │          └─ messages (in-app inbox)
-     │          └─ prefs gate ─ focus gate ─ provider.send(idempotencyKey) ─ delivery_attempts + messages
-     └─ one DELAYED master per (subscriber, workflow, digest value): partial unique index
+ Browser (React SPA)  ── REST ──┐        ┌── WebSocket /ws (JWT) ── pushes in-app
+                                ▼        ▼
+                    Express (auth · console · demo · realtime)
+                                │
+POST /events/trigger → events (202) → worker tick → resumable fan-out
+                                │
+     notifications (unique per event+subscriber) + job chain: digest → email → in-app
+                                │
+  digest: one DELAYED master per (subscriber, scope, key, value) — partial unique index
+  email:  preferences → Focus gate → provider guard (bucket + breaker) → provider (idempotency key)
+          ├─ success  → messages (unique per subscriber+channel+key) + delivery_attempts
+          ├─ transient → retry (1s/5s/15s) ── exhausted ─┐
+          └─ permanent ───────────────────────────────────┴─→ dead_letters
+  in-app: upsert message → event bus → WebSocket push
+                                │
+               SQLite (node:sqlite, WAL), schema via numbered migrations
 ```
 
 | Path | Responsibility |
 |---|---|
-| `src/db.js` | SQLite schema, transactions, all uniqueness constraints |
-| `src/engine/ingest.js` | validation, idempotent accept, bulk, broadcast, resumable fan-out |
-| `src/engine/pipeline.js` | notification + job chain, digest merge, claim/execute, retry, cancel |
-| `src/engine/subscribers.js` | subscribers, topics, preference resolution |
-| `src/engine/focus.js` | focus sessions, held events, correlation, catch-up summary |
-| `src/engine/webhooks.js` | inbound webhook verification and application |
-| `src/engine/queries.js` | inbox and admin read models |
-| `src/http/` | Express routes, API-key auth, JWT auth, rate limiter |
-| `src/providers/email.js` | provider contract, console provider, optional SMTP adapter |
+| `src/db.js` | schema, numbered migrations, transactions, prepared-statement cache |
+| `src/engine/ingest.js` | validation, idempotent accept, bulk/broadcast, resumable fan-out |
+| `src/engine/pipeline.js` | job chain, digest merge, claim/execute, retry, provider guard, dead-letter writes |
+| `src/engine/deadletters.js` | list, retry, bulk retry, dismiss |
+| `src/providers/guard.js` | token bucket + circuit breaker |
+| `src/engine/focus.js` · `webhooks.js` · `subscribers.js` · `queries.js` | Focus Mode, webhook verification, preferences, read models |
+| `src/http/` | REST routes, console/demo routes, WebSocket gateway, auth |
+| `web/` | UI source (React + TypeScript), builds into `public/` |
 
-Identities are kept apart on purpose:
+Four identities are kept distinct throughout: **event** (`transaction_id`), **notification** (unique per event + subscriber), **delivery attempt** (unique per job + attempt number), and **provider result** (`provider_message_id` / `provider_status`).
 
-| Concept | Where | Uniqueness |
+## Verification
+
+| Command | Proves | Result |
 |---|---|---|
-| Event | `events` | `transaction_id` |
-| Notification | `notifications` | `(event_id, subscriber_id)` |
-| Delivery attempt | `delivery_attempts` | `(job_id, attempt_no)` |
-| Provider result | `messages.provider_message_id` / `provider_status` | message `(subscriber_id, channel, idempotency_key)` |
+| `npm test` | 83 integration tests against a real engine, real SQLite, real HTTP and WebSocket | **83/83** |
+| `npm run test:kt1` / `kt2` / `kt3` | the three Killer Tests | pass |
+| `npm run test:gaps` | one named test per gap (G1–G8), plus migrations | pass |
+| `npm run test:webhook` / `test:focus` | the Fix and the Differentiator | pass |
+| `npm run test:e2e` | full headless-browser walkthrough: staff compose → student receives live, digest detail, search, preferences, topics, Focus Mode, every console screen, all 8 verification cards, zero console errors | **35/35** |
+| `npm run lint` | eslint (server) | clean |
+| `npm run typecheck:web` | TypeScript strict (UI) | clean |
+| `npm run bench -- 30000` | 30,000-student broadcast | see [Scale](#scale-measured) |
+| `npm run test:crash` | process killed mid-delivery, restarted on the same database | pass, see below |
 
-## Killer Tests
+`test:e2e` drives Edge or Chrome already on the machine via `playwright-core` — no browser download.
 
-| Test | Result | Where |
+## Scale (measured)
+
+`scripts/bench-broadcast.js` broadcasts one event (email + in-app) to N students on a real SQLite file, through the real worker loop, with an in-process stub provider so the measurement is of the engine rather than an SMTP server.
+
+**Measured 2026-10-06**, one process, Node 26.4, Windows 11:
+
+| Metric | 30,000 students | Target |
 |---|---|---|
-| KT1: 10 events in 5 minutes become 1 digest | passes | `tests/kt1.test.js` |
-| KT2: email muted, so in-app only | passes | `tests/kt2.test.js` |
-| KT3: failed send, retried, no duplicates | passes | `tests/kt3.test.js` |
+| API accept (`202`) | **2 ms** | < 500 ms ✔ |
+| All notifications + job chains created | 2.7 s | — |
+| First student notified | 2.7 s after accept | — |
+| All 30,000 emails + 30,000 in-app messages delivered | **38.0 s** | — |
+| Cost per 100 students | **127 ms** | < 1 s ✔ |
+| Duplicate emails | **0** | 0 |
 
-KT1 sends ten events 20 seconds apart and checks that nothing is delivered while the window is open. After it closes it checks one provider call, one email message, one in-app message, all ten events inside the content, and that the notifications are `sent: 1, digested: 9`. A separate test shows the database itself rejecting a second delayed master.
+Delivery is depth-first — each student's in-app message follows their own email immediately rather than waiting behind every other student's. The benchmark surfaced and fixed a real O(n²) scan in job claiming (now three index-backed lookups), enabled `synchronous=NORMAL` under WAL, and cached prepared statements — together, roughly 5× faster. At the default 100 emails/s provider limit, a 30,000-student broadcast takes about 5 minutes by design.
 
-KT2 checks both sides: the muted user has zero email attempts and one in-app message, and the log shows `step_skipped` for email.
+**Crash recovery** (`npm run test:crash`): 3,000-student broadcast, server hard-killed mid-delivery, restarted on the same database.
 
-KT3 checks that attempt 1 fails and is scheduled for retry, that the retry waits for the backoff, and that attempt 2 succeeds with the same idempotency key. It also checks that notification and event counts do not change, and that the log reads `email_failed(1) -> retry_scheduled -> email_sent(2)`. Further tests cover a provider that accepted the mail but returned an error, a provider that cannot de-duplicate, retry exhaustion, permanent errors, and re-running an already delivered job.
+| | Result |
+|---|---|
+| State at kill | 902 emails + 902 in-app delivered, 1 job mid-send |
+| Recovery | 3.7 s (stale lock reclaimed) |
+| Students with exactly one email / one in-app record | **3,000 / 3,000** |
+| Duplicates, failed jobs, lost students | **0 / 0 / 0** |
+| Provider calls | 3,001 — one idempotency key sent twice |
 
-## Fix: fail-closed webhook signature verification
-
-`POST /webhooks/:provider` (inbound provider callbacks, not the producer API).
-
-| Situation | Response | Effect |
-|---|---|---|
-| valid signature | 200 | applied (`provider_status` set; a bounce marks the message `delivery_failed`) |
-| invalid signature, or stale timestamp | 401 | nothing applied |
-| signature missing | 401 | nothing applied |
-| no verifier exists for the provider (`sendgrid`, unknown names) | 400 | nothing applied |
-| verifier exists but no secret configured | 400 | nothing applied |
-| unsupported provider **and** `WEBHOOK_ALLOW_UNVERIFIED_<PROVIDER>=true` | 202 | recorded as `unverified`, still never applied |
-
-Providers: `generic` (header `x-webhook-signature: sha256=<hex>`, HMAC-SHA256 over the raw body) and `mailgun` (HMAC-SHA256 of `timestamp + token` from the body, with a timestamp tolerance). Comparison is constant-time. Every request, rejected ones included, is audited in `webhook_events` without the signature or secret.
-
-What this does **not** give you: no replay protection for the `generic` scheme, and no verifier for ECDSA-signed providers such as real SendGrid (those stay rejected). The `mailgun` scheme follows the documented timestamp-plus-token idea but has not been tested against real Mailgun traffic.
-
-## Differentiator: Intelligent Focus Mode
-
-`POST /inbox/focus-mode/start {"duration":"2h"}` (also `"30m"` or a number of minutes, capped by `FOCUS_MODE_MAX_HOURS`).
-
-- While active, a **non-critical** delivery is **held** (recorded in `held_events`, job `deferred`). Muted channels are still skipped first.
-- A **critical** one is delivered at once and remembered. Critical means: the workflow is `critical`, the event was sent with `"priority":"critical"`, or a workflow rule matches, for example `{"field":"minutesUntilExam","op":"lt","value":30}`.
-- When the session ends (timer or `POST /inbox/focus-mode/end`), held events are grouped by the workflow's `correlationKey` (for example `exam`), repeats are dropped, and what changed is computed (`room: A201 -> H123`). A held event is also dropped if a critical delivery during the session, or a message the user marked seen during the session, already stated the same facts.
-- One catch-up notification is created through the normal pipeline, so email mutes and retries still apply. `GET /inbox/focus-mode/summary` returns the structured version, including how many events were suppressed.
-
-This is not the digest: a digest lists every event, while Focus Mode reports what changed, what was already delivered, and what is still outstanding.
+The one repeat is the single send in flight at the exact moment of the kill: accepted by the provider, but the result never committed before the process died. On restart it is re-sent with the **same idempotency key**; a provider that honours that key drops it, plain SMTP would not. This is the one duplicate the engine cannot prevent unilaterally — see [Known limitations](#known-limitations).
 
 ## API
 
-The routes in `docs/API.md` are implemented. The same transactionId on a repeat submission returns `202` with the first response and `"duplicate": true`. Additions beyond the documented contract:
+Everything documented in `docs/API.md` is implemented; a repeated `transactionId` returns the cached `202` response with `"duplicate": true`. Additive routes (API-key protected unless noted):
 
-| Route | Why |
+| Route | Purpose |
 |---|---|
-| `PUT /admin/workflows/:identifier`, `GET /admin/workflows` | workflows must be defined somehow (steps, digest window, critical rules) |
-| `PUT /admin/subscribers/:subscriberId` | create subscribers with an email address |
-| `PUT /admin/topics/:topic/subscribers` | topic membership for topic fan-out |
-| `PATCH /inbox/notifications/:messageId/seen` | read state; also feeds Focus Mode suppression |
-| `POST /webhooks/:provider` | the Fix |
-| `POST /inbox/focus-mode/start`, `POST /inbox/focus-mode/end`, `GET /inbox/focus-mode/status`, `GET /inbox/focus-mode/summary` | the Differentiator |
-
-Auth: producer and admin routes need `Authorization: Bearer <API_KEY>`. Inbox routes need the subscriber JWT, and the subscriber is taken only from the verified token.
+| `PUT /admin/workflows/:id`, `GET /admin/workflows` | define workflows: steps, digest window/scope, critical rules |
+| `PUT /admin/subscribers/:id`, `GET /admin/subscribers`, `PUT /admin/topics/:t/subscribers`, `GET /admin/topics` | students and topics |
+| `GET /admin/stats`, `GET /admin/events` | overview, event list |
+| `GET /admin/dead-letters`, `POST .../retry`, `POST .../dismiss` | dead-letter queue |
+| `GET /admin/providers`, `POST /admin/providers/email/reset` | provider health |
+| `GET /admin/webhooks` | webhook audit and config (never secrets) |
+| `GET /inbox/feed`, `GET .../:id`, `POST .../read`, `.../click`, `POST /inbox/read-all` (student JWT) | the product inbox — category, priority, actions, why-received, engagement |
+| `PATCH /inbox/preferences/categories/:category` (student JWT) | category preferences |
+| `GET /inbox/topics`, `POST`/`DELETE .../follow`, `GET /inbox/profile` (student JWT) | topics and profile |
+| `GET /admin/audiences`, `POST /admin/audiences/estimate`, `PUT /admin/audiences/:key` | audience catalogue, live estimate, multi-group targeting |
+| `POST /inbox/focus-mode/start`/`end`, `GET .../status`/`summary` (student JWT) | Focus Mode |
+| `POST /webhooks/:provider` (signed, no key) | inbound webhook verification |
+| `GET /ws?token=<student JWT>` | real-time in-app push |
+| `/admin/demo/*` | only when `DEMO_MODE=true`; 404 otherwise, refused in production |
 
 ## Implementation assumptions
 
-1. **Storage and queue.** `docs/ARCHITECTURE.md` says "Redis + BullMQ or similar" and MongoDB. Neither is installed here, so persistence is SQLite (`node:sqlite`) and the queue is the `jobs` table polled by a worker. The Mongo partial unique index maps to a SQLite partial unique index. Single-process only: the claim logic is multi-worker safe in principle (conditional `UPDATE`), but this was not tested with several processes.
-2. **No WebSocket gateway.** In-app delivery writes the message and emits on an in-process event bus (`engine.ctx.bus`). The UI polls every 3 seconds.
-3. **Duplicate transactionId.** `API.md` says both "409" and "202 with the cached response". 202 with the cached response is implemented.
-4. **`POST /inbox/session` is not public by default.** `API.md` marks it public, which lets anyone mint a session for any subscriber. The default is to require the API key. `INBOX_SESSION_AUTH=public` restores the documented behaviour.
-5. **In-app retries.** The docs give in-app one attempt. In-app jobs get the same attempt budget as email, because the upsert makes retry harmless and a transient preference-lookup or database error should not lose the message.
-6. **Failed email proceeds.** As in FR5, an email that fails permanently or exhausts its attempts is marked failed and the chain continues to the next step.
-7. **Digest window** starts at the first event's submission time. A digest step is only allowed as the first step of a workflow.
-8. **Cancel** removes the pending jobs of a transaction. If other transactions are merged into the same digest master, the master survives for them and only the cancelled event's content is dropped.
-9. **Expired transactionId reuse.** After 24h the old event row is renamed (`#expired#<id>`) so the id can be reused.
-10. **Critical vs. mutes.** A critical workflow ignores mutes and Focus Mode. A critical event (`priority` or rule) bypasses Focus Mode but still respects mutes.
-11. **Rate limit** is a per-API-key fixed window held in memory (default 100 events per minute).
-12. **Reserved workflow** `__focus_summary__` carries the catch-up summary and cannot be triggered or edited through the API.
+1. **Storage** — SQLite (`node:sqlite`) with a DB-backed job table, in place of MongoDB + Redis/BullMQ. The spec allows "or similar" for the queue; this choice needs no infrastructure and is fully tested. The Mongo partial unique index maps directly to a SQLite partial unique index.
+2. **Duplicate `transactionId`** — spec allows either 409 or a cached 202; this implementation returns the cached 202.
+3. **`POST /inbox/session`** requires the API key by default, since the documented "public" behaviour would let anyone impersonate any student. `INBOX_SESSION_AUTH=public` restores it; `DEMO_MODE=true` defaults to it so the demo works end-to-end.
+4. **In-app retry budget** matches email's (rather than 1), since the upsert makes retries harmless.
+5. **A failed email still proceeds** to the next step, and is also parked in the dead-letter queue.
+6. **Digest window** starts at the first event's submission; a digest step must be first in its workflow.
+7. **Cancelling** an event removes only its own content from a shared digest master.
+8. A **critical workflow** ignores mutes and Focus Mode; a **critical event** (priority or rule) bypasses Focus Mode only.
+9. **Scope exceeded on purpose** — the spec lists a preferences UI, workflow designer and analytics as out of scope; this build includes a preferences screen and a JSON-based workflow editor (not a visual designer), and a polled dashboard (not streaming analytics).
+10. **UI routes** are `/app` and `/console` (`/admin/*` is already the API namespace).
+11. **Product metadata beyond the spec** — workflow category, priority, display name and actions; event priority levels `low`–`critical`; student department/year/programme; a topic catalogue.
+12. **Brand** — "Concourse" and its visual identity are original; nothing is taken from the reference product.
 
 ## Known limitations
 
-- Not load-tested. The 30,000-recipient claim is a design property (chunked, resumable, DB-backed), not a measured result. The largest test fans out to 250 recipients.
-- The SMTP adapter (`SMTP_HOST`) needs `npm install nodemailer` first and has never been run against a real mail server. The default console provider does not send mail.
-- Email idempotency depends on the provider. With a provider that ignores the key, a failure that happens after the provider accepted the message can still send twice. The engine's own `messages` unique constraint protects its records, not the provider.
-- Webhook limits: see above.
-- Preference changes apply to jobs that have not run yet, by design, so a mute that arrives between trigger and delivery is honoured.
-- No type checker is configured (plain JavaScript); `npm run build` only verifies that files parse.
+- Single process — claim logic is written to be multi-worker safe (conditional `UPDATE`, indexed claims) but untested with more than one.
+- A crash between "provider accepted" and "result saved" re-sends the in-flight email with the same idempotency key (measured: 1 of 3,000). Only a provider honouring that key fully prevents the duplicate.
+- The email provider is a console stub unless `SMTP_HOST` is set; the SMTP adapter has not been run against a real mail server.
+- Circuit-breaker and rate-limiter state live in memory and reset on restart (safe default: starts closed).
+- Webhook replay protection exists only for the timestamp-based scheme.
+- `Dockerfile` is provided but not built in this environment.
+- Not built: scheduled digests, preference history, multi-process tests, Mailpit email capture.
+
+## Configuration
+
+See `.env.example` (names only, no values). Notable settings: `DEMO_MODE`, `EMAIL_RATE_PER_SEC`, `EMAIL_BREAKER_THRESHOLD`, `EMAIL_BREAKER_COOLDOWN_MS`, `WEBHOOK_SECRET_<PROVIDER>`, `INBOX_SESSION_AUTH`. In production, the server refuses to start with placeholder secrets or `DEMO_MODE` enabled.
+
+---
+
+<div align="center">
+
+Built for SRM University · HACKBACK V2
+
+</div>

@@ -5,7 +5,9 @@
   "private": true,
   "type": "commonjs",
   "main": "src/index.js",
-  "engines": { "node": ">=22.5" },
+  "engines": {
+    "node": ">=22.5"
+  },
   "scripts": {
     "start": "node src/index.js",
     "seed": "node src/seed.js",
@@ -17,12 +19,21 @@
     "test:focus": "node --test tests/focus.test.js",
     "lint": "eslint .",
     "check": "node scripts/check-syntax.js",
-    "build": "npm run check"
+    "build": "npm run check && npm run build:web",
+    "build:web": "npm --prefix web install && npm --prefix web run build",
+    "typecheck:web": "npm --prefix web run typecheck",
+    "test:e2e": "node scripts/e2e.js",
+    "test:gaps": "node --test tests/gaps.test.js",
+    "demo": "node scripts/demo.js",
+    "test:crash": "node scripts/crash-test.js",
+    "bench": "node scripts/bench-broadcast.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
-    "eslint": "^9.0.0"
+    "eslint": "^9.0.0",
+    "playwright-core": "^1.63.0"
   }
 }

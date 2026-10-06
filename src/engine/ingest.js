@@ -5,7 +5,7 @@ const { isUniqueViolation } = require('../db');
 
 const MAX_EXPLICIT = 100;
 const MAX_BULK = 100;
-const PRIORITIES = ['normal', 'critical'];
+const PRIORITIES = ['low', 'normal', 'high', 'critical'];
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -46,8 +46,12 @@ function createIngest(ctx) {
       if (ids.length > MAX_EXPLICIT) throw new HttpError(400, 'BadRequest', `to.subscriberIds accepts at most ${MAX_EXPLICIT} ids.`);
       recipients = [...new Set(ids)];
     } else if (to.type === 'topic') {
-      if (typeof to.topic !== 'string' || !to.topic) throw new HttpError(400, 'BadRequest', 'to.topic is required.');
-      recipients = [to.topic];
+      // One topic, or several (union), e.g. course CS301 OR the Coding Club.
+      const topics = Array.isArray(to.topics) ? to.topics : [to.topic];
+      if (topics.length === 0 || topics.length > 20 || topics.some((t) => typeof t !== 'string' || !t)) {
+        throw new HttpError(400, 'BadRequest', 'to.topic (or to.topics, 1..20) is required.');
+      }
+      recipients = [...new Set(topics)];
     } else {
       recipients = [];
     }
@@ -56,7 +60,7 @@ function createIngest(ctx) {
 
   const recipientCount = (type, recipients) => {
     if (type === 'explicit') return recipients.length;
-    if (type === 'topic') return ctx.subscribers.topicMembers(recipients[0]).length;
+    if (type === 'topic') return ctx.subscribers.audienceSize(recipients);
     return ctx.subscribers.count();
   };
 
@@ -146,7 +150,7 @@ function createIngest(ctx) {
   function resolveRecipients(event) {
     const recipients = parseJson(event.recipients, []);
     if (event.recipient_type === 'explicit') return recipients;
-    if (event.recipient_type === 'topic') return ctx.subscribers.topicMembers(recipients[0]);
+    if (event.recipient_type === 'topic') return ctx.subscribers.audienceMembers(recipients);
     return ctx.subscribers.allExternalIds();
   }
 

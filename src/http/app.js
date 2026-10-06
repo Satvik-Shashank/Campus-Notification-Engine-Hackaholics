@@ -4,6 +4,12 @@ const path = require('node:path');
 const express = require('express');
 const { HttpError, toIso } = require('../util');
 const { signJwt, requireApiKey, requireSubscriber, rateLimiter } = require('./auth');
+const { mountConsoleRoutes } = require('./console');
+const { mountDemoRoutes } = require('./demo');
+const { mountProductRoutes } = require('./product');
+const { mountOperationsRoutes } = require('./operations');
+
+const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -55,7 +61,7 @@ function createApp(engine) {
   });
 
   app.use(express.json({ limit: '1mb' }));
-  app.use(express.static(path.join(__dirname, '..', '..', 'public')));
+  app.use(express.static(PUBLIC_DIR, { index: 'index.html' }));
 
   // ---- event producers (API key) ----
   app.post('/events/trigger', apiKey, limit, (req, res) => {
@@ -80,7 +86,7 @@ function createApp(engine) {
   // ---- admin (API key) ----
   app.get('/admin/activity', apiKey, (req, res) => res.json(ctx.queries.activity(req.query)));
   app.get('/admin/notifications/:transactionId', apiKey, (req, res) => res.json(ctx.queries.notificationStatus(req.params.transactionId)));
-  app.get('/admin/workflows', apiKey, (_req, res) => res.json({ workflows: ctx.workflows.list().filter((w) => !w.identifier.startsWith('__')) }));
+  app.get('/admin/workflows', apiKey, (req, res) => res.json({ workflows: ctx.workflows.list().filter((w) => !w.identifier.startsWith('__') && (req.query.internal === 'true' || !w.identifier.startsWith('demo-'))) }));
   app.put('/admin/workflows/:identifier', apiKey, (req, res) => {
     if (req.params.identifier.startsWith('__')) throw new HttpError(400, 'BadRequest', "Identifiers starting with '__' are reserved.");
     res.json(ctx.workflows.upsert(req.params.identifier, req.body));
@@ -97,6 +103,11 @@ function createApp(engine) {
     const added = ctx.subscribers.setTopicMembers(req.params.topic, (req.body || {}).subscriberIds);
     res.json({ topic: req.params.topic, added, members: ctx.subscribers.topicMembers(req.params.topic).length });
   });
+
+  mountConsoleRoutes(app, ctx, apiKey);
+  mountProductRoutes(app, ctx, { apiKey, subscriberAuth, currentSubscriber });
+  mountOperationsRoutes(app, ctx, { apiKey });
+  if (config.demoMode) mountDemoRoutes(app, ctx, apiKey);
 
   // ---- inbox (subscriber JWT) ----
   app.post('/inbox/session', (req, res, next) => {
@@ -118,6 +129,10 @@ function createApp(engine) {
   app.get('/inbox/notifications', subscriberAuth, (req, res) => res.json(ctx.queries.inbox(currentSubscriber(req), req.query)));
   app.patch('/inbox/notifications/:messageId/seen', subscriberAuth, (req, res) => {
     res.json(ctx.queries.markSeen(currentSubscriber(req), req.params.messageId));
+  });
+
+  app.patch('/inbox/notifications/:messageId/archived', subscriberAuth, (req, res) => {
+    res.json(ctx.queries.setArchived(currentSubscriber(req), req.params.messageId, (req.body || {}).archived));
   });
 
   app.get('/inbox/preferences', subscriberAuth, (req, res) => res.json(ctx.subscribers.getPreferences(currentSubscriber(req))));
@@ -151,6 +166,9 @@ function createApp(engine) {
     if (id !== undefined && !Number.isInteger(id)) throw new HttpError(400, 'BadRequest', 'sessionId must be an integer.');
     res.json(ctx.focus.latestSummary(currentSubscriber(req), id));
   });
+
+  // Single-page app routes: the Student Portal (/app) and the Operator Console (/console).
+  app.get(/^\/(app|console|internal)(\/.*)?$/, (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
 
   app.use((req, _res, next) => next(new HttpError(404, 'NotFound', `No route for ${req.method} ${req.path}`)));
 

@@ -76,15 +76,19 @@ function createPipeline(ctx) {
   function enterDigest(job, step, payload, windowStart) {
     const digestKey = step.digestKey || '';
     const digestValue = step.digestKey ? String(payload[step.digestKey] ?? '') : '';
+    // Default scope is the workflow itself; a named group lets several workflows share one digest (G8).
+    const digestScope = step.groupScope ? `group:${step.groupScope}` : `workflow:${job.workflow_id}`;
     const notification = getNotification(job.notification_id);
-    const entry = { transactionId: job.transaction_id, notificationId: job.notification_id, at: clock.now(), payload };
+    const entry = {
+      transactionId: job.transaction_id, notificationId: job.notification_id, workflowId: job.workflow_id, at: clock.now(), payload,
+    };
 
     for (let tries = 0; tries < 5; tries += 1) {
       const now = clock.now();
       const master = db.get(
         `SELECT * FROM jobs WHERE step_type = 'digest' AND status = 'delayed' AND subscriber_id = ?
-           AND workflow_id = ? AND digest_key = ? AND digest_value = ?`,
-        job.subscriber_id, job.workflow_id, digestKey, digestValue,
+           AND digest_scope = ? AND digest_key = ? AND digest_value = ?`,
+        job.subscriber_id, digestScope, digestKey, digestValue,
       );
       if (master && master.run_at <= now) {
         // Window already closed but the worker has not released it yet: release it, start a new window.
@@ -101,8 +105,9 @@ function createPipeline(ctx) {
         events.push(entry);
         db.run('UPDATE jobs SET digest_events = ?, updated_at = ? WHERE id = ?', JSON.stringify(events), now, master.id);
         db.run(
-          `UPDATE jobs SET status = 'merged', master_job_id = ?, digest_key = ?, digest_value = ?, updated_at = ? WHERE id = ?`,
-          master.id, digestKey, digestValue, now, job.id,
+          `UPDATE jobs SET status = 'merged', master_job_id = ?, digest_scope = ?, digest_key = ?, digest_value = ?, updated_at = ?
+           WHERE id = ?`,
+          master.id, digestScope, digestKey, digestValue, now, job.id,
         );
         db.run(`UPDATE jobs SET status = 'merged', master_job_id = ?, updated_at = ? WHERE notification_id = ? AND step_index > ?`,
           master.id, now, job.notification_id, job.step_index);
@@ -116,9 +121,9 @@ function createPipeline(ctx) {
       }
       try {
         db.run(
-          `UPDATE jobs SET status = 'delayed', digest_key = ?, digest_value = ?, digest_events = ?, run_at = ?, updated_at = ?
-           WHERE id = ?`,
-          digestKey, digestValue, JSON.stringify([entry]), windowStart + step.windowMs, now, job.id,
+          `UPDATE jobs SET status = 'delayed', digest_scope = ?, digest_key = ?, digest_value = ?, digest_events = ?, run_at = ?,
+             updated_at = ? WHERE id = ?`,
+          digestScope, digestKey, digestValue, JSON.stringify([entry]), windowStart + step.windowMs, now, job.id,
         );
         rollup(job.notification_id);
         ctx.activity.log({
@@ -196,27 +201,50 @@ function createPipeline(ctx) {
 
   // -------------------------------------------------------------- execution
 
+  /** Events this delivery covers: the digest's aggregated entries, or just the notification itself. */
   function eventsFor(notification) {
     const digest = db.get(`SELECT digest_events FROM jobs WHERE notification_id = ? AND step_type = 'digest'`, notification.id);
     const events = digest && digest.digest_events ? parseJson(digest.digest_events, []) : [];
-    return events.length ? events.map((e) => e.payload) : [parseJson(notification.payload, {})];
+    return events.length
+      ? events.map((e) => ({ payload: e.payload, workflowId: e.workflowId ?? notification.workflow_id }))
+      : [{ payload: parseJson(notification.payload, {}), workflowId: notification.workflow_id }];
   }
 
-  function render(step, payloads) {
-    if (payloads.length === 1) {
-      return { subject: renderTemplate(step.subject, payloads[0]), body: renderTemplate(step.body, payloads[0]) };
+  function render(step, entries) {
+    if (entries.length === 1) {
+      const p = entries[0].payload;
+      return { subject: renderTemplate(step.subject, p), body: renderTemplate(step.body, p) };
     }
-    const latest = payloads[payloads.length - 1];
+    // A cross-workflow digest renders each event with its own workflow's template and labels it.
+    const cache = new Map();
+    const workflowOf = (id) => {
+      if (!cache.has(id)) cache.set(id, ctx.workflows.getById(id));
+      return cache.get(id);
+    };
+    const mixed = new Set(entries.map((e) => e.workflowId)).size > 1;
+    const latest = entries[entries.length - 1].payload;
     return {
-      subject: `${payloads.length} updates: ${renderTemplate(step.subject, latest)}`,
-      body: payloads.map((p, i) => `${i + 1}. ${renderTemplate(step.body, p)}`).join('\n'),
+      subject: `${entries.length} updates: ${renderTemplate(step.subject, latest)}`,
+      body: entries.map((e, i) => {
+        const wf = workflowOf(e.workflowId);
+        const own = (wf && wf.steps.find((s) => s.type === step.type)) || step;
+        const label = mixed && wf ? `[${wf.identifier}] ` : '';
+        return `${i + 1}. ${label}${renderTemplate(own.body, e.payload)}`;
+      }).join('\n'),
     };
   }
 
-  function claimNext(now) {
+  function claimNext(now, preferId = null) {
     const staleBefore = now - config.jobLockTimeoutMs;
     const where = `(status = 'queued') OR (status = 'retrying' AND next_retry_at <= ?) OR (status = 'running' AND locked_at <= ?)`;
-    const candidate = db.get(`SELECT id FROM jobs WHERE ${where} ORDER BY COALESCE(run_at, 0), id LIMIT 1`, now, staleBefore);
+    // Three index-backed lookups instead of one OR query, so claiming stays O(log n) at 30k+ jobs.
+    // A just-unblocked next step of the chain we finished goes first (depth-first: a student's in-app
+    // message does not wait behind every other student's email). Then crash-recovered work, due
+    // retries, and the queue in arrival order.
+    const candidate = (preferId && db.get(`SELECT id FROM jobs WHERE id = ? AND status = 'queued'`, preferId))
+      || db.get(`SELECT id FROM jobs WHERE status = 'running' AND locked_at <= ? LIMIT 1`, staleBefore)
+      || db.get(`SELECT id FROM jobs WHERE status = 'retrying' AND next_retry_at <= ? ORDER BY next_retry_at LIMIT 1`, now)
+      || db.get(`SELECT id FROM jobs WHERE status = 'queued' ORDER BY run_at, id LIMIT 1`);
     if (!candidate) return null;
     const claimed = db.run(
       `UPDATE jobs SET status = 'running', locked_at = ?, attempts = attempts + 1,
@@ -249,6 +277,24 @@ function createPipeline(ctx) {
     attempt: job.attempts, ...extra,
   });
 
+  /**
+   * Park a permanently failed job in the dead-letter queue (G7), in the same transaction that failed it.
+   * One row per job: a job that fails again after an operator retry re-opens its existing letter.
+   */
+  function deadLetter(job, channel, reason, error) {
+    const now = clock.now();
+    db.run(
+      `INSERT INTO dead_letters (job_id, notification_id, subscriber_id, workflow_id, transaction_id, channel, reason,
+         last_error, attempts, status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?, 'open', ?, ?)
+       ON CONFLICT(job_id) DO UPDATE SET status = 'open', reason = excluded.reason, last_error = excluded.last_error,
+         attempts = excluded.attempts, updated_at = excluded.updated_at, resolved_at = NULL`,
+      job.id, job.notification_id, job.subscriber_id, job.workflow_id, job.transaction_id, channel, reason,
+      error ?? null, job.attempts, now, now,
+    );
+    log(job, { event: 'dead_lettered', status: 'failure', message: `Moved to dead-letter queue (${reason})`, error });
+  }
+
   /** Record a failed try: schedule a bounded retry for transient errors, otherwise fail and move on. */
   function recordFailure(job, channel, err, transient) {
     const label = channel === 'email' ? 'email' : 'inapp';
@@ -275,6 +321,7 @@ function createPipeline(ctx) {
           event: 'delivery_failed', status: 'failure',
           message: transient ? 'Gave up after max attempts' : 'Permanent error; not retrying', error: message,
         });
+        deadLetter(job, channel, transient ? 'attempts_exhausted' : 'permanent_error', message);
         advance(job);
       }
     });
@@ -325,6 +372,24 @@ function createPipeline(ctx) {
       return;
     }
     const { subject, body } = render(step, eventsFor(notification));
+    const gate = ctx.providerGuard.acquire();
+    if (!gate.ok) {
+      // Throttled or circuit open: the provider was not called, so this try does not count (G6).
+      db.tx(() => {
+        db.run(
+          `UPDATE jobs SET status = 'retrying', attempts = attempts - 1, next_retry_at = ?, locked_at = NULL, updated_at = ?
+           WHERE id = ?`,
+          gate.retryAt, clock.now(), job.id,
+        );
+        rollup(job.notification_id);
+        log(job, {
+          event: gate.reason === 'throttled' ? 'provider_throttled' : 'circuit_open', status: 'info',
+          attempt: job.attempts - 1,
+          message: `${gate.reason === 'throttled' ? 'Provider rate limit' : 'Provider circuit open'}; rescheduled without using an attempt`,
+        });
+      });
+      return;
+    }
     db.tx(() => recordAttempt(job, 'email', 'started'));
     let result;
     try {
@@ -332,9 +397,12 @@ function createPipeline(ctx) {
         to: subscriber.email, subject, body, idempotencyKey: job.idempotency_key, from: config.smtp.from,
       });
     } catch (err) {
-      recordFailure(job, 'email', err, err instanceof ProviderError ? err.transient : true);
+      const transient = err instanceof ProviderError ? err.transient : true;
+      ctx.providerGuard.onFailure({ message: err.message, transient, status: err.status, retryAfterMs: err.retryAfterMs });
+      recordFailure(job, 'email', err, transient);
       return;
     }
+    ctx.providerGuard.onSuccess();
     db.tx(() => {
       const now = clock.now();
       db.run(
@@ -403,17 +471,23 @@ function createPipeline(ctx) {
     const subscriber = db.get('SELECT * FROM subscribers WHERE id = ?', job.subscriber_id);
     const step = workflow && workflow.steps[job.step_index];
     if (!notification || !subscriber || !step || step.type !== job.step_type) {
-      finishJob(job.id, 'failed', { error: 'workflow, step or subscriber no longer available' });
-      log(job, { event: 'delivery_failed', status: 'failure', message: 'Job could not be rehydrated', error: 'rehydrate_failed' });
-      rollup(job.notification_id);
+      db.tx(() => {
+        finishJob(job.id, 'failed', { error: 'workflow, step or subscriber no longer available' });
+        log(job, { event: 'delivery_failed', status: 'failure', message: 'Job could not be rehydrated', error: 'rehydrate_failed' });
+        if (job.step_type !== 'digest') deadLetter(job, job.step_type, 'rehydrate_failed', 'workflow, step or subscriber no longer available');
+        rollup(job.notification_id);
+      });
       return;
     }
     if (job.attempts > job.max_attempts && job.step_type !== 'digest') {
       // Reclaimed after crashes more often than the attempt budget allows.
-      finishJob(job.id, 'failed', { error: 'attempt budget exhausted' });
-      setDelivery(job.notification_id, job.step_type, 'failed');
-      log(job, { event: 'delivery_failed', status: 'failure', message: 'Attempt budget exhausted', error: 'attempts_exhausted' });
-      advance(job);
+      db.tx(() => {
+        finishJob(job.id, 'failed', { error: 'attempt budget exhausted' });
+        setDelivery(job.notification_id, job.step_type, 'failed');
+        log(job, { event: 'delivery_failed', status: 'failure', message: 'Attempt budget exhausted', error: 'attempts_exhausted' });
+        deadLetter(job, job.step_type, 'attempts_exhausted', 'attempt budget exhausted after repeated crashes');
+        advance(job);
+      });
       return;
     }
     if (job.step_type === 'digest') {
@@ -439,11 +513,15 @@ function createPipeline(ctx) {
 
   async function runDueJobs() {
     let ran = 0;
+    let follow = null;
     for (;;) {
-      const job = claimNext(clock.now());
+      const job = claimNext(clock.now(), follow);
       if (!job) break;
-      if (job.retry) continue;
+      if (job.retry) { follow = null; continue; }
       await execute(job);
+      const next = db.get(`SELECT id FROM jobs WHERE notification_id = ? AND step_index = ? AND status = 'queued'`,
+        job.notification_id, job.step_index + 1);
+      follow = next ? next.id : null;
       ran += 1;
       if (ran > 1000000) break;
     }

@@ -88,6 +88,10 @@ function createQueries(ctx) {
         if (!['true', 'false'].includes(String(q.seen))) throw new HttpError(400, 'BadRequest', 'seen must be true or false.');
         where.push('m.seen = ?'); params.push(String(q.seen) === 'true' ? 1 : 0);
       }
+      if (q.archived !== undefined) {
+        if (!['true', 'false'].includes(String(q.archived))) throw new HttpError(400, 'BadRequest', 'archived must be true or false.');
+        where.push('m.archived = ?'); params.push(String(q.archived) === 'true' ? 1 : 0);
+      }
       const total = db.get(`SELECT COUNT(*) AS n FROM messages m WHERE ${where.join(' AND ')}`, ...params).n;
       const rows = db.all(
         `SELECT m.*, w.identifier AS wf FROM messages m JOIN notifications n ON n.id = m.notification_id
@@ -103,6 +107,17 @@ function createQueries(ctx) {
           createdAt: toIso(m.created_at), updatedAt: toIso(m.updated_at),
         })),
       };
+    },
+
+    /** Archive or unarchive one of the caller's own in-app messages (archiving also marks it seen). */
+    setArchived(subscriber, messageId, archived) {
+      if (typeof archived !== 'boolean') throw new HttpError(400, 'BadRequest', 'archived must be a boolean.');
+      const m = /^msg_(\d+)$/.exec(String(messageId));
+      const row = m && db.get(`SELECT id FROM messages WHERE id = ? AND subscriber_id = ? AND channel = 'in-app'`, Number(m[1]), subscriber.id);
+      if (!row) throw new HttpError(404, 'NotFound', 'Message not found.');
+      db.run(`UPDATE messages SET archived = ?, seen = CASE WHEN ? = 1 THEN 1 ELSE seen END, updated_at = ? WHERE id = ?`,
+        archived ? 1 : 0, archived ? 1 : 0, ctx.clock.now(), row.id);
+      return { status: 'updated', messageId: `msg_${row.id}`, archived };
     },
 
     /** Marks one of the caller's own in-app messages as seen. */
